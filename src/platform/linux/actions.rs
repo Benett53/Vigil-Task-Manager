@@ -503,11 +503,13 @@ mod tests {
         assert!(set_affinity(pid, &vec![false; mask.len()]).is_err());
 
         let details = details(pid);
+        // `sleep` may be a multi-call binary (BusyBox on Alpine), so compare with the real path.
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
         assert!(
             details
                 .rows
                 .iter()
-                .any(|(k, v)| k == "Executable" && v.ends_with("sleep"))
+                .any(|(k, v)| k == "Executable" && *v == exe.to_string_lossy())
         );
 
         send_signal(pid, ProcSignal::Terminate).unwrap();
