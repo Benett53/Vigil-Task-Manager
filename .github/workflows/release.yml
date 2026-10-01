@@ -4,12 +4,18 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (without the leading v), e.g. 0.1.0"
+        required: true
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag pushes use the tag name, manual runs the given version.
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   linux:
@@ -38,7 +44,7 @@ jobs:
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}.2.28
       - name: Package tarball
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${VERSION#v}
           DIR=vigil-$VERSION-linux-${{ matrix.arch }}
           mkdir -p $DIR/icons
           cp target/${{ matrix.target }}/release/vigil $DIR/
@@ -71,7 +77,7 @@ jobs:
       - name: Package zip
         shell: pwsh
         run: |
-          $version = "$env:GITHUB_REF_NAME".TrimStart("v")
+          $version = "$env:VERSION".TrimStart("v")
           $dir = "vigil-$version-windows-x86_64"
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/release/vigil.exe, LICENSE, README.md $dir
@@ -85,16 +91,35 @@ jobs:
     name: Publish release
     needs: [linux, windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
       - name: Checksums
         run: sha256sum *.tar.gz *.deb *.rpm *.zip > SHA256SUMS.txt
+      - name: Release tag
+        run: |
+          V="${VERSION#v}"
+          echo "TAG=v$V" >> "$GITHUB_ENV"
+      # Creates the tag (if needed) at the built commit and uploads all artifacts.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          name: Vigil Task Manager ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | System | File |
+            |---|---|
+            | Debian, Ubuntu, Mint, Pop!_OS, ... | `vigil-task-manager_*_amd64.deb` (ARM: `_arm64.deb`) → `sudo apt install ./vigil-task-manager_*.deb` |
+            | Fedora, RHEL, openSUSE, ... | `vigil-task-manager-*.x86_64.rpm` (ARM: `.aarch64.rpm`) → `sudo dnf install ./vigil-task-manager-*.rpm` |
+            | Any Linux distribution | `vigil-*-linux-x86_64.tar.gz` → extract, run `./vigil` directly or `./install.sh` |
+            | Windows 10 / 11 | `vigil-*-windows-x86_64.zip` → extract and run `vigil.exe` |
+
+            Linux binaries require glibc 2.28 or newer. Verify downloads with `SHA256SUMS.txt`.
           files: |
             *.tar.gz
             *.deb
