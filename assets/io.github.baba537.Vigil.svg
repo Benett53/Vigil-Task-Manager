@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16b5a8"/>
+      <stop offset="1" stop-color="#0b5f63"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/>
+  <rect x="12" y="12" width="232" height="116" rx="52" fill="url(#shine)"/>
+  <!-- graph grid -->
+  <g stroke="#ffffff" stroke-opacity="0.16" stroke-width="3">
+    <line x1="44" y1="84" x2="212" y2="84"/>
+    <line x1="44" y1="128" x2="212" y2="128"/>
+    <line x1="44" y1="172" x2="212" y2="172"/>
+  </g>
+  <!-- filled activity area -->
+  <path d="M44 172 L78 172 L96 150 L116 186 L140 74 L162 160 L178 128 L212 128 L212 204 L44 204 Z" fill="#ffffff" fill-opacity="0.16"/>
+  <!-- pulse line -->
+  <path d="M44 172 L78 172 L96 150 L116 186 L140 74 L162 160 L178 128 L212 128" fill="none" stroke="#ffffff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="212" cy="128" r="11" fill="#ffffff"/>
+</svg>

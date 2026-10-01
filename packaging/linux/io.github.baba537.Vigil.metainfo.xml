@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.baba537.Vigil</id>
+  <name>Vigil Task Manager</name>
+  <summary>Fast, free and open source task manager</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.baba537">
+    <name>Vigil contributors</name>
+  </developer>
+  <description>
+    <p>
+      Vigil is a task manager in the spirit of the Windows Task Manager, built for Linux first
+      and also available for Windows. It is completely free: no subscriptions, no paid tiers,
+      no telemetry and no accounts.
+    </p>
+    <ul>
+      <li>Processes grouped into apps, background and system processes with heat-map columns</li>
+      <li>Performance graphs for CPU (overall and per core), memory, disks, network and GPUs</li>
+      <li>App history, startup apps, users, details and services pages</li>
+      <li>End task, end process tree, suspend/resume, priority, CPU affinity and efficiency mode</li>
+      <li>Works on X11 and Wayland with every desktop environment</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.baba537.Vigil.desktop</launchable>
+  <url type="homepage">https://github.com/baba537/Vigil-Task-Manager</url>
+  <url type="bugtracker">https://github.com/baba537/Vigil-Task-Manager/issues</url>
+  <categories>
+    <category>System</category>
+    <category>Monitor</category>
+  </categories>
+  <provides>
+    <binary>vigil</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-01">
+      <description>
+        <p>First public release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

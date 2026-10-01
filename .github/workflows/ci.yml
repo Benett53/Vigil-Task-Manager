@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Smoke test (collect one snapshot without a display)
+        run: cargo run --release --locked -- --snapshot
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked
+
+  distros:
+    name: Snapshot on ${{ matrix.image }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "fedora:latest", "archlinux:latest", "opensuse/tumbleweed", "alpine:latest"]
+    container: ${{ matrix.image }}
+    # musl based Alpine is best effort (no official desktop target).
+    continue-on-error: ${{ matrix.image == 'alpine:latest' }}
+    steps:
+      - name: Install build tools
+        shell: sh
+        run: |
+          if command -v apt-get >/dev/null; then apt-get update && apt-get install -y curl gcc git ca-certificates
+          elif command -v dnf >/dev/null; then dnf install -y gcc git curl
+          elif command -v pacman >/dev/null; then pacman -Syu --noconfirm gcc git curl
+          elif command -v zypper >/dev/null; then zypper -n install gcc git curl
+          elif command -v apk >/dev/null; then apk add gcc musl-dev git curl bash
+          fi
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - uses: actions/checkout@v4
+      - name: Test and collect a snapshot
+        shell: sh
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test --locked
+          cargo run --locked -- --snapshot

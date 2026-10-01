@@ -1,0 +1,45 @@
+# Maintainer: Vigil contributors
+pkgname=vigil-task-manager
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fast, free and open source task manager (Windows Task Manager style)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/baba537/Vigil-Task-Manager"
+license=('GPL-3.0-or-later')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'libglvnd' 'libx11' 'libxcursor' 'libxi' 'libxrandr')
+optdepends=('polkit: perform actions as administrator'
+            'nvidia-utils: NVIDIA GPU monitoring'
+            'hwdata: GPU model names')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "Vigil-Task-Manager-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "Vigil-Task-Manager-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "Vigil-Task-Manager-$pkgver"
+  cargo test --frozen
+}
+
+package() {
+  cd "Vigil-Task-Manager-$pkgver"
+  local app=io.github.baba537.Vigil
+  install -Dm755 target/release/vigil "$pkgdir/usr/bin/vigil"
+  install -Dm644 packaging/linux/$app.desktop "$pkgdir/usr/share/applications/$app.desktop"
+  install -Dm644 packaging/linux/$app.metainfo.xml "$pkgdir/usr/share/metainfo/$app.metainfo.xml"
+  install -Dm644 assets/$app.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$app.svg"
+  for size in 32 48 64 128 256; do
+    install -Dm644 assets/vigil-$size.png "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/$app.png"
+  done
+}

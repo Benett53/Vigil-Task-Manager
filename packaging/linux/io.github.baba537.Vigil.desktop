@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Vigil Task Manager
+GenericName=Task Manager
+Comment=Monitor processes, performance, startup apps and services
+Exec=vigil
+Icon=io.github.baba537.Vigil
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;monitor;cpu;memory;gpu;kill;performance;services;startup;
+StartupNotify=true
+StartupWMClass=io.github.baba537.Vigil
+Actions=performance;
+
+[Desktop Action performance]
+Name=Performance
+Exec=vigil --page performance
