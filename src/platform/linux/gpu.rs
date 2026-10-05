@@ -187,6 +187,11 @@ impl GpuMonitor {
             s.shared_mem_used = read_u64(dev.join("mem_info_gtt_used"));
             if let Some(hw) = &card.hwmon {
                 s.temperature = read_u64(hw.join("temp1_input")).map(|v| v as f32 / 1000.0);
+                s.power_w = read_u64(hw.join("power1_average"))
+                    .or_else(|| read_u64(hw.join("power1_input")))
+                    .map(|uw| uw as f32 / 1_000_000.0);
+                s.fan_rpm = read_u64(hw.join("fan1_input")).map(|r| r as f32);
+                s.clock_mhz = read_u64(hw.join("freq1_input")).map(|hz| hz as f32 / 1_000_000.0);
             }
             // Utilisation from fdinfo for drivers without a busy counter.
             if s.util.is_none() {
@@ -215,6 +220,9 @@ impl GpuMonitor {
                 s.mem_used = nv.mem_used.or(s.mem_used);
                 s.mem_total = nv.mem_total.or(s.mem_total);
                 s.temperature = nv.temperature.or(s.temperature);
+                s.power_w = nv.power_w.or(s.power_w);
+                s.fan_percent = nv.fan_percent;
+                s.clock_mhz = nv.clock_mhz.or(s.clock_mhz);
             }
             out.push(s);
         }
@@ -233,6 +241,9 @@ impl GpuMonitor {
                 mem_total: nv.mem_total,
                 temperature: nv.temperature,
                 pci_slot: nv.pci.clone(),
+                power_w: nv.power_w,
+                fan_percent: nv.fan_percent,
+                clock_mhz: nv.clock_mhz,
                 ..Default::default()
             });
         }

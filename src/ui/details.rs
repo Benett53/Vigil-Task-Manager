@@ -1,8 +1,11 @@
 //! "Details" page: a flat, sortable list of every process with technical columns.
 
 use super::proc_menu::process_menu;
-use super::processes::{col_title, column_spec, is_numeric, status_text, visible_columns};
+use super::processes::{
+    col_title, column_spec, is_numeric, status_badge, status_text, visible_columns,
+};
 use super::table::{Col, Sort, cell_label, cmp_f64, cmp_str, header, right_label};
+use super::widgets::avatar;
 use super::{Action, View};
 use crate::model::{Priority, ProcSignal, Process};
 use crate::util::{contains_ci, fmt_bytes, fmt_cpu_time, fmt_rate, fmt_unix_time};
@@ -14,7 +17,8 @@ pub struct State {
     pub selected: Option<u32>,
     pub scroll_to: Option<u32>,
     pending_move: i32,
-    cache: Option<(u64, Sort, String, bool, Vec<usize>)>,
+    #[allow(clippy::type_complexity)]
+    cache: Option<((u64, Sort, String, bool, bool), Vec<(usize, u8, bool)>)>,
 }
 
 impl Default for State {
@@ -82,8 +86,16 @@ impl State {
 pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<Action>) {
     let snap = view.snap;
     let kernel = view.settings.show_kernel_threads;
-    let stale = !matches!(&state.cache, Some((seq, sort, search, k, _)) if *seq == snap.seq && *sort == state.sort && search == view.search && *k == kernel);
-    if stale {
+    // A tree only makes sense for the full list; while searching, matches are listed flat.
+    let tree = view.settings.details_tree && view.search.is_empty();
+    let key = (
+        snap.procs_seq,
+        state.sort,
+        view.search.to_owned(),
+        kernel,
+        tree,
+    );
+    if state.cache.as_ref().is_none_or(|c| c.0 != key) {
         let mut idx: Vec<usize> = (0..snap.procs.len())
             .filter(|&i| {
                 (kernel || !snap.procs[i].kernel_thread) && matches(&snap.procs[i], view.search)
@@ -91,10 +103,17 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
             .collect();
         let sort = state.sort;
         idx.sort_by(|&a, &b| cmp(&snap.procs[a], &snap.procs[b], sort));
-        state.cache = Some((snap.seq, state.sort, view.search.to_owned(), kernel, idx));
+        let entries = if tree {
+            build_tree(&snap.procs, &idx)
+        } else {
+            idx.into_iter().map(|i| (i, 0, false)).collect()
+        };
+        state.cache = Some((key, entries));
     }
     let cache = state.cache.take().expect("built above");
-    let rows = &cache.4;
+    let entries = &cache.1;
+    let rows: Vec<usize> = entries.iter().map(|e| e.0).collect();
+    let rows = &rows;
 
     if state.pending_move != 0 {
         let cur = state
@@ -158,19 +177,47 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                 }
             })
             .body(|body| {
-                body.rows(22.0, rows.len(), |mut row| {
-                    let p = &snap.procs[rows[row.index()]];
+                body.rows(24.0, rows.len(), |mut row| {
+                    let (pi, depth, last) = entries[row.index()];
+                    let p = &snap.procs[pi];
                     row.set_selected(state.selected == Some(p.pid));
                     for c in &cols {
                         row.col(|ui| match c {
                             Col::Name => {
-                                ui.add_space(4.0);
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                if depth > 0 {
+                                    let indent = 16.0 * depth as f32;
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(indent, ui.available_height()),
+                                        Sense::hover(),
+                                    );
+                                    let x = rect.right() - 8.0;
+                                    let stroke = egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().weak_text_color().gamma_multiply(0.6),
+                                    );
+                                    let bottom = if last {
+                                        rect.center().y
+                                    } else {
+                                        rect.bottom() + 2.0
+                                    };
+                                    ui.painter().vline(x, rect.top() - 2.0..=bottom, stroke);
+                                    ui.painter()
+                                        .hline(x..=rect.right(), rect.center().y, stroke);
+                                } else {
+                                    ui.add_space(4.0);
+                                }
+                                avatar(ui, &p.name, 16.0, p.kernel_thread);
                                 cell_label(ui, &*p.name);
                             }
                             Col::Pid => right_label(ui, p.pid.to_string()),
                             Col::Status => {
                                 let s = status_text(p);
-                                cell_label(ui, if s.is_empty() { p.state.label() } else { s });
+                                if s.is_empty() {
+                                    cell_label(ui, RichText::new(p.state.label()).weak());
+                                } else {
+                                    status_badge(ui, s);
+                                }
                             }
                             Col::User => cell_label(ui, &*p.user),
                             Col::Cpu => right_label(ui, format!("{:.1}%", p.cpu * cpu_scale)),
@@ -225,4 +272,43 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
     if new_sel.is_some() {
         state.selected = new_sel;
     }
+}
+
+/// Orders processes depth-first under their parents; returns (index, depth, last child).
+/// `sorted` holds the visible processes in the requested sort order, which is kept
+/// among siblings.
+fn build_tree(procs: &[Process], sorted: &[usize]) -> Vec<(usize, u8, bool)> {
+    use std::collections::{HashMap, HashSet};
+    let visible: HashSet<u32> = sorted.iter().map(|&i| procs[i].pid).collect();
+    let mut children: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut roots = Vec::new();
+    for &i in sorted {
+        let p = &procs[i];
+        if p.ppid != p.pid && visible.contains(&p.ppid) {
+            children.entry(p.ppid).or_default().push(i);
+        } else {
+            roots.push(i);
+        }
+    }
+    let mut out = Vec::with_capacity(sorted.len());
+    // Explicit stack instead of recursion: process trees can be very deep.
+    let mut stack: Vec<(usize, u8, bool)> = roots
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(k, &i)| (i, 0, k == 0))
+        .collect();
+    let mut seen = HashSet::new();
+    while let Some((i, depth, last)) = stack.pop() {
+        if !seen.insert(i) {
+            continue;
+        }
+        out.push((i, depth, last));
+        if let Some(kids) = children.get(&procs[i].pid) {
+            for (k, &c) in kids.iter().rev().enumerate() {
+                stack.push((c, depth.saturating_add(1).min(40), k == 0));
+            }
+        }
+    }
+    out
 }

@@ -6,11 +6,12 @@ mod devices;
 mod gpu;
 mod process;
 pub mod procfs;
+mod sensors;
 pub mod services;
 pub mod startup;
 pub mod users;
 
-use crate::model::{CpuSample, MemSample, Snapshot, StaticInfo, SystemSample};
+use crate::model::{CpuSample, MemSample, Process, Snapshot, StaticInfo, SystemSample};
 use procfs::{
     CpuTimes, parse_cpu_list, parse_meminfo, parse_proc_stat, parse_size_suffix, read_into,
     read_trimmed, read_u64,
@@ -30,11 +31,16 @@ pub struct Collector {
     apps_loaded: Instant,
     users: users::UserCache,
     prev_cpu: Option<(CpuTimes, Vec<CpuTimes>)>,
+    prev_counters: Option<(u64, u64)>,
     last: Option<Instant>,
     seq: u64,
     buf: String,
-    freq_paths: Vec<PathBuf>,
-    temp_path: Option<PathBuf>,
+    /// (cpu index, scaling_cur_freq path)
+    freq_paths: Vec<(usize, PathBuf)>,
+    sensors: sensors::Sensors,
+    procs: Arc<Vec<Process>>,
+    procs_seq: u64,
+    threads: usize,
 }
 
 impl Collector {
@@ -43,11 +49,14 @@ impl Collector {
         let boot_time = boot_time();
         let freq_paths = (0..info.logical.max(1))
             .map(|i| {
-                PathBuf::from(format!(
-                    "/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
-                ))
+                (
+                    i,
+                    PathBuf::from(format!(
+                        "/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
+                    )),
+                )
             })
-            .filter(|p| p.exists())
+            .filter(|(_, p)| p.exists())
             .collect();
         Collector {
             scanner: process::ProcessScanner::new(boot_time, info.current_uid),
@@ -59,11 +68,15 @@ impl Collector {
             apps_loaded: Instant::now(),
             users: users::UserCache::default(),
             prev_cpu: None,
+            prev_counters: None,
             last: None,
             seq: 0,
             buf: String::with_capacity(8192),
             freq_paths,
-            temp_path: find_cpu_temp(),
+            sensors: sensors::Sensors::with_root(sys_root()),
+            procs: Arc::new(Vec::new()),
+            procs_seq: 0,
+            threads: 0,
         }
     }
 
@@ -83,25 +96,33 @@ impl Collector {
             self.apps_loaded = now;
         }
 
-        let cpu = self.sample_cpu();
-        let mem = self.sample_mem();
-        let disks = self.disks.sample(elapsed);
-        let nets = self.nets.sample(elapsed);
+        self.sensors.refresh();
+        let mut cpu = self.sample_cpu(elapsed);
+        (cpu.temperature, cpu.core_temps) = self.sensors.cpu();
+        let mut mem = self.sample_mem();
+        mem.temperature = self.sensors.memory();
+        let disks = self.disks.sample(elapsed, &self.sensors);
+        let nets = self.nets.sample(elapsed, &self.sensors);
 
         self.gpu.begin(elapsed);
-        let (procs, threads) = if with_processes {
+        // Scanning every process is the most expensive part of a refresh; the caller
+        // throttles it when no page shows per-process data. GPU accounting continues
+        // for the (few) processes known to use the GPU so graphs stay live.
+        if with_processes || self.procs_seq == 0 {
             let r = self.scanner.scan(
-                elapsed,
                 self.info.logical,
                 &self.apps,
                 &mut self.users,
                 &mut self.gpu,
             );
-            (r.procs, r.threads)
+            self.threads = r.threads;
+            self.procs = Arc::new(r.procs);
+            self.procs_seq += 1;
         } else {
-            (Vec::new(), 0)
-        };
+            self.scanner.scan_gpu_only(&mut self.gpu);
+        }
         let gpus = self.gpu.finish();
+        let batteries = sensors::batteries(&sys_root());
 
         let uptime = read_trimmed("/proc/uptime")
             .and_then(|s| {
@@ -114,26 +135,42 @@ impl Collector {
             .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()));
 
         Snapshot {
-            seq: self.seq,
             cpu,
             mem,
             disks,
             nets,
             gpus,
+            sensors: self.sensors.readings.clone(),
+            batteries,
             sys: SystemSample {
                 uptime_secs: uptime,
-                processes: procs.len(),
-                threads,
+                processes: self.procs.len(),
+                threads: self.threads,
                 handles,
             },
-            procs,
+            procs: self.procs.clone(),
+            procs_seq: self.procs_seq,
             info: self.info.clone(),
         }
     }
 
-    fn sample_cpu(&mut self) -> CpuSample {
+    fn sample_cpu(&mut self, elapsed: f64) -> CpuSample {
         let mut s = CpuSample::default();
         if read_into("/proc/stat", &mut self.buf).is_ok() {
+            let counter = |key: &str| {
+                self.buf.lines().find_map(|l| {
+                    l.strip_prefix(key)
+                        .and_then(|v| v.split_whitespace().next())
+                        .and_then(|v| v.parse::<u64>().ok())
+                })
+            };
+            if let (Some(ctxt), Some(intr)) = (counter("ctxt "), counter("intr ")) {
+                if let Some((pc, pi)) = self.prev_counters {
+                    s.ctx_switches = Some(ctxt.saturating_sub(pc) as f64 / elapsed);
+                    s.interrupts = Some(intr.saturating_sub(pi) as f64 / elapsed);
+                }
+                self.prev_counters = Some((ctxt, intr));
+            }
             let (total, cores) = parse_proc_stat(&self.buf);
             if let Some((ptotal, pcores)) = &self.prev_cpu {
                 let (busy, kernel) = total.usage_since(ptotal);
@@ -151,20 +188,21 @@ impl Collector {
         }
         let mut sum = 0u64;
         let mut n = 0u64;
-        for p in &self.freq_paths {
+        if !self.freq_paths.is_empty() {
+            s.per_core_freq = vec![0.0; s.per_core.len().max(self.info.logical)];
+        }
+        for (cpu, p) in &self.freq_paths {
             if let Some(khz) = read_u64(p) {
                 sum += khz;
                 n += 1;
+                if let Some(slot) = s.per_core_freq.get_mut(*cpu) {
+                    *slot = khz as f32 / 1000.0;
+                }
             }
         }
         if n > 0 {
             s.freq_mhz = Some(sum as f64 / n as f64 / 1000.0);
         }
-        s.temperature = self
-            .temp_path
-            .as_ref()
-            .and_then(read_u64)
-            .map(|m| m as f32 / 1000.0);
         s.load_avg = read_trimmed("/proc/loadavg").and_then(|l| {
             let mut it = l.split_whitespace().map(|v| v.parse::<f32>().ok());
             Some([it.next()??, it.next()??, it.next()??])
@@ -194,8 +232,17 @@ impl Collector {
             swap_total: m.swap_total,
             swap_used: m.swap_total.saturating_sub(m.swap_free + m.swap_cached),
             compressed: m.zswap,
+            temperature: None,
         }
     }
+}
+
+/// Root of sysfs for sensors and batteries. `VIGIL_SYS_ROOT` points it at a fake tree,
+/// which lets developers test sensor handling for hardware they do not have.
+fn sys_root() -> PathBuf {
+    std::env::var_os("VIGIL_SYS_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys"))
 }
 
 fn boot_time() -> u64 {
@@ -212,39 +259,6 @@ fn boot_time() -> u64 {
                 .unwrap_or(0.0);
             crate::util::now_unix().saturating_sub(up as u64)
         })
-}
-
-fn find_cpu_temp() -> Option<PathBuf> {
-    let read = std::fs::read_dir("/sys/class/hwmon").ok()?;
-    let mut candidates: Vec<(u8, PathBuf)> = Vec::new();
-    for ent in read.flatten() {
-        let dir = ent.path();
-        let name = read_trimmed(dir.join("name")).unwrap_or_default();
-        let prio = match name.as_str() {
-            "k10temp" | "zenpower" => 0,
-            "coretemp" => 1,
-            "cpu_thermal" | "soc_thermal" | "cpu-thermal" => 2,
-            "acpitz" => 5,
-            _ => continue,
-        };
-        // Prefer the "Tctl"/"Package" sensor, otherwise temp1.
-        let mut best = dir.join("temp1_input");
-        for i in 1..=8 {
-            let label = read_trimmed(dir.join(format!("temp{i}_label"))).unwrap_or_default();
-            if label.starts_with("Tctl")
-                || label.starts_with("Tdie")
-                || label.starts_with("Package")
-            {
-                best = dir.join(format!("temp{i}_input"));
-                break;
-            }
-        }
-        if best.exists() {
-            candidates.push((prio, best));
-        }
-    }
-    candidates.sort_by_key(|c| c.0);
-    candidates.into_iter().next().map(|c| c.1)
 }
 
 fn static_info() -> StaticInfo {

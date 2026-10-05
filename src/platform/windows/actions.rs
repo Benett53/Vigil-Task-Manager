@@ -373,6 +373,7 @@ pub fn file_description(exe: &str) -> Option<String> {
 pub fn details(pid: u32) -> ProcessDetails {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut rows = vec![("PID".to_owned(), pid.to_string())];
+    let mut environment = Vec::new();
     let mut sys = System::new();
     let spid = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes_specifics(
@@ -433,6 +434,12 @@ pub fn details(pid: u32) -> ProcessDetails {
             crate::util::fmt_bytes(du.total_written_bytes),
         );
         push("Environment variables", p.environ().len().to_string());
+        environment = p
+            .environ()
+            .iter()
+            .map(|e| e.to_string_lossy().into_owned())
+            .collect();
+        environment.sort();
     }
     if let Ok(proc) = Proc::open(pid, PROCESS_QUERY_LIMITED_INFORMATION, "query") {
         // SAFETY: valid handle.
@@ -444,7 +451,11 @@ pub fn details(pid: u32) -> ProcessDetails {
                 .into(),
         ));
     }
-    ProcessDetails { rows }
+    ProcessDetails {
+        rows,
+        environment,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

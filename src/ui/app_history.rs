@@ -6,6 +6,7 @@ use crate::history::AppUsage;
 use crate::util::{contains_ci, fmt_bytes, fmt_cpu_time, fmt_unix_time};
 use egui::{Align, Layout, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
+use egui_phosphor::regular as icon;
 
 pub struct State {
     pub sort: Sort,
@@ -35,7 +36,10 @@ pub fn show(
         ui.separator();
         ui.checkbox(all_processes, "Show history for all processes");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Delete usage history").clicked() {
+            if ui
+                .button(format!("{} Delete usage history", icon::TRASH))
+                .clicked()
+            {
                 actions.push(Action::ResetAppHistory);
             }
         });

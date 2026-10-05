@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 pub enum Command {
     SetInterval(Duration),
     SetPaused(bool),
+    /// Scan the process list only every N-th refresh (1 = every refresh).
+    SetProcessEvery(u32),
     RefreshNow,
 }
 
@@ -56,6 +58,9 @@ fn run(
 ) {
     let mut collector: Option<Collector> = None;
     let mut failures = 0u32;
+    let mut process_every: u32 = 1;
+    let mut tick: u64 = 0;
+    let mut force_processes = true;
     loop {
         if collector.is_none() {
             match catch_unwind(Collector::new) {
@@ -71,7 +76,10 @@ fn run(
         let c = collector.as_mut().expect("initialised above");
         // A bug in a collector must never take the whole application down:
         // recover by starting with a fresh collector.
-        match catch_unwind(AssertUnwindSafe(|| c.sample(true))) {
+        let with_processes = force_processes || tick.is_multiple_of(process_every.max(1) as u64);
+        force_processes = false;
+        tick += 1;
+        match catch_unwind(AssertUnwindSafe(|| c.sample(with_processes))) {
             Ok(snapshot) => {
                 failures = 0;
                 if out.send(Arc::new(snapshot)).is_err() {
@@ -112,7 +120,19 @@ fn run(
                         break;
                     }
                 }
-                Ok(Command::RefreshNow) => break,
+                Ok(Command::SetProcessEvery(n)) => {
+                    // Switching to a page with process data should not wait for the next scan.
+                    if n < process_every {
+                        force_processes = true;
+                        process_every = n.max(1);
+                        break;
+                    }
+                    process_every = n.max(1);
+                }
+                Ok(Command::RefreshNow) => {
+                    force_processes = true;
+                    break;
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     if !paused {
                         break;

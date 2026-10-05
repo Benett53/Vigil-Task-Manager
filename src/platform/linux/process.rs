@@ -33,6 +33,8 @@ struct Cached {
     unit: Option<Arc<str>>,
     last_cpu_ticks: u64,
     last_io: Option<(u64, u64)>,
+    /// (rss pages from `stat`, private bytes, resident bytes) of the last `statm` read.
+    last_mem: Option<(u64, u64, u64)>,
     drm_fds: Vec<u32>,
     fds_scanned_at: Option<Instant>,
     seen: u64,
@@ -49,6 +51,7 @@ pub struct ProcessScanner {
     path: String,
     fdinfo: Vec<String>,
     pub show_gpu: bool,
+    last_scan: Option<Instant>,
 }
 
 pub struct ScanResult {
@@ -76,12 +79,34 @@ impl ProcessScanner {
             path: String::with_capacity(64),
             fdinfo: Vec::new(),
             show_gpu: true,
+            last_scan: None,
         }
+    }
+
+    /// Accounts GPU usage of the processes known to use the GPU, without a full scan.
+    /// Used between full scans so GPU graphs stay live while process scanning is throttled.
+    pub fn scan_gpu_only(&mut self, gpu: &mut GpuMonitor) {
+        if !self.show_gpu {
+            return;
+        }
+        let mut infos = std::mem::take(&mut self.fdinfo);
+        for (pid, cache) in &self.cache {
+            if cache.drm_fds.is_empty() {
+                continue;
+            }
+            infos.clear();
+            for fd in &cache.drm_fds {
+                if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) {
+                    infos.push(s);
+                }
+            }
+            gpu.account_process(*pid, infos.iter().map(String::as_str));
+        }
+        self.fdinfo = infos;
     }
 
     pub fn scan(
         &mut self,
-        elapsed: f64,
         ncpu: usize,
         apps: &AppIndex,
         users: &mut UserCache,
@@ -90,6 +115,13 @@ impl ProcessScanner {
         self.seq += 1;
         let seq = self.seq;
         let now = Instant::now();
+        // Scans may be throttled, so rates are computed over the time since the last scan.
+        let elapsed = self
+            .last_scan
+            .map(|l| now.duration_since(l).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.05);
+        self.last_scan = Some(now);
         let mut procs = Vec::with_capacity(self.cache.len().max(256));
         let mut threads = 0usize;
         let cpu_denominator = (elapsed * self.clk_tck * ncpu.max(1) as f64).max(1e-9);
@@ -161,9 +193,17 @@ impl ProcessScanner {
             };
             cache.last_cpu_ticks = cpu_ticks;
 
+            // A process that used no CPU time since the last scan cannot have touched its
+            // memory or I/O counters, so its cached values are reused. Every 10th scan
+            // (staggered by pid) re-reads everything to catch shared-memory changes.
+            let idle = !fresh && delta_ticks == 0 && !(seq + pid as u64).is_multiple_of(10);
+
             // Memory
             let (mut mem, mut rss) = (0, rss_pages * self.page_size);
-            if !cache.kernel_thread {
+            if let Some((_, m, r)) = cache.last_mem.filter(|c| idle && c.0 == rss_pages) {
+                mem = m;
+                rss = r;
+            } else if !cache.kernel_thread {
                 self.path.clear();
                 let _ = write!(self.path, "/proc/{pid}/statm");
                 if read_into(&self.path, &mut self.buf).is_ok()
@@ -171,12 +211,17 @@ impl ProcessScanner {
                 {
                     rss = res * self.page_size;
                     mem = res.saturating_sub(shared) * self.page_size;
+                    cache.last_mem = Some((rss_pages, mem, rss));
                 }
             }
 
             // Disk I/O (only readable for own processes unless running as root)
             let mut disk = None;
-            if !cache.kernel_thread && (self.current_uid == 0 || cache.uid == self.current_uid) {
+            if idle && cache.last_io.is_some() {
+                disk = Some((0, 0));
+            } else if !cache.kernel_thread
+                && (self.current_uid == 0 || cache.uid == self.current_uid)
+            {
                 self.path.clear();
                 let _ = write!(self.path, "/proc/{pid}/io");
                 if read_into(&self.path, &mut self.buf).is_ok()
@@ -197,9 +242,12 @@ impl ProcessScanner {
                 && !cache.kernel_thread
                 && (self.current_uid == 0 || cache.uid == self.current_uid)
             {
+                // Processes that use the GPU are re-checked every 5 s, all others every 30 s:
+                // listing file descriptors is the most expensive part of a scan.
+                let every = if cache.drm_fds.is_empty() { 30 } else { 5 };
                 let rescan = cache
                     .fds_scanned_at
-                    .is_none_or(|t| now.duration_since(t).as_secs() >= 5);
+                    .is_none_or(|t| now.duration_since(t).as_secs() >= every);
                 if rescan {
                     cache.drm_fds = drm_fds(pid);
                     cache.fds_scanned_at = Some(now);
@@ -335,6 +383,7 @@ impl ProcessScanner {
             app_checked: false,
             last_cpu_ticks: 0,
             last_io: None,
+            last_mem: None,
             drm_fds: Vec::new(),
             fds_scanned_at: None,
             seen: 0,

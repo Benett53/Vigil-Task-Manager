@@ -35,6 +35,25 @@ pub struct DeviceHistory {
     pub a: Series,
     pub b: Series,
     pub c: Series,
+    /// Temperature in °C (empty if the device has no sensor).
+    pub temp: Series,
+}
+
+impl DeviceHistory {
+    fn push_temp(&mut self, t: Option<f32>, cap: usize) {
+        if let Some(t) = t {
+            self.temp.push(t, cap);
+        }
+    }
+}
+
+/// CPU and memory history of the process selected on the Processes page.
+#[derive(Default)]
+pub struct ProcessHistory {
+    pub key: Option<crate::ui::processes::Sel>,
+    pub cpu: Series,
+    pub mem: Series,
+    pub disk: Series,
 }
 
 #[derive(Default)]
@@ -42,14 +61,18 @@ pub struct History {
     pub cpu: Series,
     pub cpu_kernel: Series,
     pub cores: Vec<Series>,
+    pub cpu_temp: Series,
     pub mem: Series,
+    pub mem_temp: Series,
     pub swap: Series,
     /// Per disk: active %, read B/s, write B/s.
     pub disks: HashMap<String, DeviceHistory>,
     /// Per adapter: receive B/s, send B/s.
     pub nets: HashMap<String, DeviceHistory>,
-    /// Per GPU: utilisation %, memory %.
+    /// Per GPU: utilisation %, memory %, power W.
     pub gpus: HashMap<String, DeviceHistory>,
+    /// Per battery: charge %, power W.
+    pub batteries: HashMap<String, DeviceHistory>,
 }
 
 impl History {
@@ -70,6 +93,12 @@ impl History {
                 (a as f64 / b as f64 * 100.0) as f32
             }
         };
+        if let Some(t) = s.cpu.temperature {
+            self.cpu_temp.push(t, cap);
+        }
+        if let Some(t) = s.mem.temperature {
+            self.mem_temp.push(t, cap);
+        }
         self.mem.push(pct(s.mem.used, s.mem.total), cap);
         self.swap.push(pct(s.mem.swap_used, s.mem.swap_total), cap);
 
@@ -79,12 +108,14 @@ impl History {
             h.a.push(d.active.unwrap_or(0.0), cap);
             h.b.push(d.read_bps as f32, cap);
             h.c.push(d.write_bps as f32, cap);
+            h.push_temp(d.temperature, cap);
         }
         self.nets.retain(|k, _| s.nets.iter().any(|n| &n.id == k));
         for n in &s.nets {
             let h = self.nets.entry(n.id.clone()).or_default();
             h.a.push(n.rx_bps as f32, cap);
             h.b.push(n.tx_bps as f32, cap);
+            h.push_temp(n.temperature, cap);
         }
         self.gpus.retain(|k, _| s.gpus.iter().any(|g| &g.id == k));
         for g in &s.gpus {
@@ -95,6 +126,16 @@ impl History {
                 _ => 0.0,
             };
             h.b.push(mem, cap);
+            h.c.push(g.power_w.unwrap_or(0.0), cap);
+            h.push_temp(g.temperature, cap);
+        }
+        self.batteries
+            .retain(|k, _| s.batteries.iter().any(|b| &b.id == k));
+        for b in &s.batteries {
+            let h = self.batteries.entry(b.id.clone()).or_default();
+            h.a.push(b.percent, cap);
+            h.b.push(b.power_w.unwrap_or(0.0), cap);
+            h.push_temp(b.temperature, cap);
         }
     }
 }
@@ -132,7 +173,7 @@ impl AppHistory {
             self.since = crate::util::now_unix();
         }
         let now = crate::util::now_unix();
-        for p in &s.procs {
+        for p in s.procs.iter() {
             if p.kernel_thread {
                 continue;
             }

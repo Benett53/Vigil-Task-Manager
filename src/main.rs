@@ -3,6 +3,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod export;
 mod history;
 mod model;
 mod platform;
@@ -33,25 +34,30 @@ fn print_help() {
 
 /// Text summary used for bug reports and for testing the collectors without a display.
 fn print_snapshot() {
+    use std::fmt::Write as _;
     use util::{fmt_bits, fmt_bytes, fmt_rate, fmt_uptime};
+    let mut out = String::new();
     let mut collector = platform::Collector::new();
     let _ = collector.sample(true);
     std::thread::sleep(std::time::Duration::from_millis(500));
     let s = collector.sample(true);
     let i = &s.info;
-    println!(
+    let _ = writeln!(
+        out,
         "Host:        {} ({}, kernel {})",
         i.hostname, i.os_name, i.kernel
     );
-    println!("User:        {}", i.current_user);
+    let _ = writeln!(out, "User:        {}", i.current_user);
     if !i.desktop.is_empty() || !i.session_type.is_empty() {
-        println!("Desktop:     {} {}", i.desktop, i.session_type);
+        let _ = writeln!(out, "Desktop:     {} {}", i.desktop, i.session_type);
     }
-    println!(
+    let _ = writeln!(
+        out,
         "CPU:         {} — {} sockets, {} cores, {} logical — {:.1}% used",
         i.cpu_model, i.sockets, i.cores, i.logical, s.cpu.total
     );
-    println!(
+    let _ = writeln!(
+        out,
         "Memory:      {} / {} used, swap {} / {}",
         fmt_bytes(s.mem.used),
         fmt_bytes(s.mem.total),
@@ -59,7 +65,8 @@ fn print_snapshot() {
         fmt_bytes(s.mem.swap_total)
     );
     for d in &s.disks {
-        println!(
+        let _ = writeln!(
+            out,
             "Disk:        {} {} {} — {:.0}% active, R {} W {} {:?}",
             d.id,
             d.kind,
@@ -71,7 +78,8 @@ fn print_snapshot() {
         );
     }
     for n in &s.nets {
-        println!(
+        let _ = writeln!(
+            out,
             "Network:     {} ({}) — {} down {} up {:?}",
             n.id,
             n.kind,
@@ -81,12 +89,49 @@ fn print_snapshot() {
         );
     }
     for g in &s.gpus {
-        println!(
+        let _ = writeln!(
+            out,
             "GPU:         {} [{}] — util {:?}, vram {:?}/{:?}",
             g.name, g.driver, g.util, g.mem_used, g.mem_total
         );
     }
-    println!(
+    if let Some(t) = s.cpu.temperature {
+        let cores: Vec<String> = s
+            .cpu
+            .core_temps
+            .iter()
+            .map(|(l, v)| format!("{l} {v:.0}"))
+            .collect();
+        let _ = writeln!(out, "CPU temp:    {t:.1} °C {}", cores.join(", "));
+    }
+    for d in s.disks.iter().filter(|d| d.temperature.is_some()) {
+        let _ = writeln!(
+            out,
+            "Disk temp:   {} {:.1} °C",
+            d.id,
+            d.temperature.unwrap_or_default()
+        );
+    }
+    for r in &s.sensors {
+        let _ = writeln!(
+            out,
+            "Sensor:      {} / {} = {:.2} ({:?})",
+            r.chip, r.label, r.value, r.kind
+        );
+    }
+    for b in &s.batteries {
+        let _ = writeln!(
+            out,
+            "Battery:     {} {:.0}% {} power {:?} W health {:?}%",
+            b.id,
+            b.percent,
+            b.status,
+            b.power_w,
+            b.health()
+        );
+    }
+    let _ = writeln!(
+        out,
         "System:      {} processes, {} threads, up {}",
         s.sys.processes,
         s.sys.threads,
@@ -94,12 +139,14 @@ fn print_snapshot() {
     );
     let mut procs: Vec<_> = s.procs.iter().collect();
     procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.mem.cmp(&a.mem)));
-    println!(
+    let _ = writeln!(
+        out,
         "\n{:>8}  {:<10} {:>6}  {:>10}  {:<12} NAME",
         "PID", "USER", "CPU%", "MEMORY", "KIND"
     );
     for p in procs.iter().take(15) {
-        println!(
+        let _ = writeln!(
+            out,
             "{:>8}  {:<10} {:>6.1}  {:>10}  {:<12} {}{}",
             p.pid,
             p.user.chars().take(10).collect::<String>(),
@@ -113,6 +160,8 @@ fn print_snapshot() {
                 .unwrap_or_default()
         );
     }
+    // Ignore errors such as a closed pipe (`vigil --snapshot | head`).
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), out.as_bytes());
 }
 
 fn main() -> ExitCode {

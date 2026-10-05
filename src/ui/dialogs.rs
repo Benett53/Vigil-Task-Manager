@@ -3,6 +3,7 @@
 use super::Action;
 use crate::model::{Priority, ProcSignal, ProcessDetails};
 use egui::{Context, Id, Key, Modal, RichText, ScrollArea};
+use egui_phosphor::regular as icon;
 
 /// An operation that failed with "permission denied" and can be retried elevated.
 #[derive(Clone, Debug)]
@@ -28,6 +29,17 @@ pub struct PropertiesWindow {
     pub name: String,
     pub details: Option<ProcessDetails>,
     pub open: bool,
+    pub tab: PropTab,
+    pub filter: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PropTab {
+    #[default]
+    General,
+    Threads,
+    Files,
+    Environment,
 }
 
 pub struct AffinityDialog {
@@ -151,7 +163,7 @@ impl Dialogs {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if can_elevate && ui.button(RichText::new("🛡 Retry as administrator").strong()).clicked() {
+                if can_elevate && ui.button(RichText::new(format!("{} Retry as administrator", icon::SHIELD_CHECK)).strong()).clicked() {
                     out.push(Outcome::Elevate(retry.clone()));
                     close = true;
                 }
@@ -319,20 +331,111 @@ impl Dialogs {
                         ui.spinner();
                     }
                     Some(d) => {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut w.tab, PropTab::General, format!("{} General", icon::INFO));
+                            ui.selectable_value(
+                                &mut w.tab,
+                                PropTab::Threads,
+                                format!("{} Threads ({})", icon::TREE_STRUCTURE, d.threads.len()),
+                            );
+                            ui.selectable_value(
+                                &mut w.tab,
+                                PropTab::Files,
+                                format!("{} Open files ({})", icon::FILE_TEXT, d.open_files.len()),
+                            );
+                            ui.selectable_value(
+                                &mut w.tab,
+                                PropTab::Environment,
+                                format!("{} Environment ({})", icon::LIST_DASHES, d.environment.len()),
+                            );
+                        });
+                        if w.tab != PropTab::General {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::MAGNIFYING_GLASS).weak());
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut w.filter)
+                                        .hint_text("Filter")
+                                        .desired_width(240.0),
+                                );
+                            });
+                        }
+                        ui.separator();
+                        let filter = w.filter.to_lowercase();
+                        let keep = |s: &str| filter.is_empty() || crate::util::contains_ci(s, &filter);
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                egui::Grid::new(("props_grid", w.pid))
-                                    .num_columns(2)
-                                    .striped(true)
-                                    .spacing([14.0, 4.0])
-                                    .show(ui, |ui| {
-                                        for (k, v) in &d.rows {
-                                            ui.label(RichText::new(k).weak());
-                                            ui.add(egui::Label::new(v).wrap());
+                            .show(ui, |ui| match w.tab {
+                                PropTab::General => {
+                                    egui::Grid::new(("props_grid", w.pid))
+                                        .num_columns(2)
+                                        .striped(true)
+                                        .spacing([14.0, 4.0])
+                                        .show(ui, |ui| {
+                                            for (k, v) in &d.rows {
+                                                ui.label(RichText::new(k).weak());
+                                                ui.add(egui::Label::new(v).wrap());
+                                                ui.end_row();
+                                            }
+                                        });
+                                }
+                                PropTab::Threads => {
+                                    if d.threads.is_empty() {
+                                        ui.label(RichText::new("Thread information is not available.").weak());
+                                    }
+                                    egui::Grid::new(("props_threads", w.pid))
+                                        .num_columns(4)
+                                        .striped(true)
+                                        .spacing([18.0, 3.0])
+                                        .show(ui, |ui| {
+                                            for h in ["TID", "Name", "State", "CPU time"] {
+                                                ui.label(RichText::new(h).strong());
+                                            }
                                             ui.end_row();
-                                        }
-                                    });
+                                            for (tid, name, state, cpu) in
+                                                d.threads.iter().filter(|t| keep(&t.1) || keep(&t.0.to_string()))
+                                            {
+                                                ui.label(tid.to_string());
+                                                ui.label(name);
+                                                ui.label(RichText::new(state).weak());
+                                                ui.label(crate::util::fmt_cpu_time(*cpu));
+                                                ui.end_row();
+                                            }
+                                        });
+                                }
+                                PropTab::Files => {
+                                    if d.open_files.is_empty() {
+                                        ui.label(
+                                            RichText::new("No open files are visible (this may require administrator rights).")
+                                                .weak(),
+                                        );
+                                    }
+                                    egui::Grid::new(("props_files", w.pid))
+                                        .num_columns(2)
+                                        .striped(true)
+                                        .spacing([18.0, 3.0])
+                                        .show(ui, |ui| {
+                                            for (fd, target) in d.open_files.iter().filter(|f| keep(&f.1)) {
+                                                ui.label(RichText::new(fd).weak());
+                                                ui.add(egui::Label::new(target).wrap());
+                                                ui.end_row();
+                                            }
+                                        });
+                                }
+                                PropTab::Environment => {
+                                    if d.environment.is_empty() {
+                                        ui.label(
+                                            RichText::new("The environment is not readable (this may require administrator rights).")
+                                                .weak(),
+                                        );
+                                    }
+                                    for e in d.environment.iter().filter(|e| keep(e)) {
+                                        let (k, v) = e.split_once('=').unwrap_or((e, ""));
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(RichText::new(k).strong());
+                                            ui.label(RichText::new(v).weak());
+                                        });
+                                    }
+                                }
                             });
                     }
                 });

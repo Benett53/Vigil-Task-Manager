@@ -26,7 +26,7 @@ or they are closed source / freemium. Vigil aims to be the task manager you woul
 
 - **Free forever.** Licensed under the GPL v3 (or later). Every feature is in the free version because there is no other version.
 - **Private.** Vigil never connects to the internet. No telemetry, no update pings, no account.
-- **Light.** A single native binary (Rust + egui). On a typical system the sampling thread uses well under 1 % of one CPU core at the default update speed; the UI only redraws when there is new data.
+- **Light.** A single native binary (Rust + egui). On a typical system the sampling thread uses well under 1 % of one CPU core at the default update speed; the full process scan only runs at full speed while a process list is on screen, and the UI only redraws when there is new data.
 - **Stable.** Data collection runs in its own thread and recovers automatically from errors; vanished processes, missing permissions and exotic hardware are handled gracefully instead of crashing.
 - **Universal.** Works on X11 and Wayland with GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt, Budgie, COSMIC, Sway, Hyprland, i3 and any other desktop — no toolkit lock-in.
 
@@ -36,12 +36,12 @@ Vigil covers every page of the Windows Task Manager:
 
 | Page | What you get |
 |------|--------------|
-| **Processes** | Apps / Background / System grouping, apps expandable to their child processes, heat-map colored CPU, memory, disk and GPU columns with totals in the header, optional PID, status, user, threads, priority, working set, virtual memory, start time and command line columns, instant search. |
-| **Performance** | Live graphs for **CPU** (overall or per logical processor, kernel time), **Memory** (usage, composition bar, committed, cached, swap, kernel memory), every **Disk** (active time, read/write throughput, response time), every **Network adapter** (send/receive, IPv4/IPv6, MAC, link speed) and every **GPU** (utilization, dedicated/shared memory, temperature). Speed, processes, threads, handles, up time, base speed, sockets, cores, caches, virtualization, temperature and load average. |
+| **Processes** | Overview tiles for CPU, memory, disk, network and GPU (with temperatures); filter chips for All / Apps / Background / System and "hide idle"; collapsible groups, apps expandable to their child processes; heat-map colored CPU, memory, disk and GPU columns with totals in the header; optional PID, status, user, threads, priority, working set, virtual memory, start time and command line columns; instant search; a detail pane with live graphs and quick actions for the selected process. |
+| **Performance** | Live graphs for **CPU** (overall or per logical processor, kernel time, temperature per core), **Memory** (usage, composition bar, committed, cached, swap, kernel memory, module temperature), every **Disk** (active time, read/write throughput, response time, temperature), every **Network adapter** (send/receive, IPv4/IPv6, MAC, link speed, Wi-Fi signal, temperature), every **GPU** (utilization, dedicated/shared memory, temperature, power, clock, fan), every **Battery** (charge, power draw, health, cycles, time remaining) and a **Sensors** view with every temperature, fan, voltage and power sensor. Hover a graph for exact values. |
 | **App history** | CPU time, disk reads/writes and GPU time accumulated per application, kept across restarts, with "Delete usage history". |
 | **Startup apps** | XDG autostart entries and user-enabled systemd user services on Linux; registry *Run* keys and Startup folders on Windows. Enable, disable, add, remove, open file location. Last boot time breakdown (systemd). |
 | **Users** | Resource usage per user account, expandable to the user's processes, "End all processes". |
-| **Details** | Flat, sortable list of every process with technical columns (CPU time, nice/priority, threads, RSS, virtual memory, start time, command line, ...), kernel threads optional. |
+| **Details** | Sortable list or **process tree** of every process with technical columns (CPU time, nice/priority, threads, RSS, virtual memory, start time, command line, ...), kernel threads optional. |
 | **Services** | systemd system **and** user services (OpenRC on non-systemd distributions, the Service Control Manager on Windows): status, PID, startup type; start, stop, restart, enable, disable; jump from a process to its service and back. |
 
 Process actions (context menu, toolbar and keyboard):
@@ -50,11 +50,12 @@ Process actions (context menu, toolbar and keyboard):
 - **Suspend / Resume**
 - **Efficiency mode** — lowest CPU priority plus idle I/O class on Linux; EcoQoS + idle priority class on Windows, exactly like Windows 11
 - **Set priority**, **Set affinity** (choose CPU cores)
-- **Open file location**, **Search online** (DuckDuckGo), **Copy** name / PID / path / command line, **Properties**
+- **Open file location**, **Search online** (DuckDuckGo), **Copy** name / PID / path / command line
+- **Properties** with tabs for general information, threads, open files and environment variables
 - **Run new task**, optionally with administrator rights
 - Actions on processes of other users can be **retried as administrator** via polkit (`pkexec`) on Linux or UAC on Windows.
 
-More: light / dark / system theme, zoom, adjustable update speed (0.5 s / 1 s / 4 s / paused), graph history length, always-on-top, per-core or whole-system CPU percentages, column chooser, persistent settings.
+More: **export the process list as CSV**, light / dark / system theme, zoom, adjustable update speed (0.5 s / 1 s / 4 s / paused), graph history length, always-on-top, per-core or whole-system CPU percentages, column chooser, persistent settings.
 
 ### GPU support
 
@@ -64,6 +65,14 @@ More: light / dark / system theme, zoom, adjustable update speed (0.5 s / 1 s / 
 | Intel (`i915`, `xe`) | ✔ (DRM fdinfo) | — | ✔ (DRM fdinfo) |
 | NVIDIA (proprietary driver) | ✔ (NVML) | ✔ | ✔ (NVML) |
 | NVIDIA (`nouveau`), ARM SoCs (`msm`, `panfrost`, `v3d`, ...) | where the driver exposes DRM fdinfo | — | where exposed |
+
+### Temperatures and sensors
+
+On Linux, Vigil reads the kernel's `hwmon` and thermal interfaces and maps every sensor to the device it belongs to:
+CPU (`k10temp`, `coretemp`, `zenpower`, ARM thermal zones), memory modules (`spd5118`, `jc42`), NVMe drives,
+SATA drives (needs the `drivetemp` kernel module: `sudo modprobe drivetemp`), network adapters, GPUs and batteries.
+Fans, voltages, currents and power sensors (e.g. `nct6775`, `it87`) appear in the Sensors view.
+On Windows, temperatures come from WMI thermal zones where the firmware provides them.
 
 NVML is loaded at runtime only if present — there is no build-time or run-time dependency on NVIDIA software.
 GPU model names come from the system `pci.ids` database (package `hwdata` / `pciutils`).

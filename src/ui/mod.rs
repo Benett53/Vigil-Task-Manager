@@ -15,7 +15,7 @@ pub mod theme;
 pub mod users;
 pub mod widgets;
 
-use crate::history::{AppHistory, History};
+use crate::history::{AppHistory, History, ProcessHistory};
 use crate::model::{Priority, ProcSignal, ServiceAction, Snapshot, StartupEntry};
 use crate::settings::Settings;
 
@@ -50,6 +50,8 @@ pub enum Action {
     StartupAddDialog,
     ResetAppHistory,
     RefreshNow,
+    ShowPerformance(performance::PerfSel),
+    ExportCsv,
 }
 
 /// Read-only data a page needs to render.
@@ -57,6 +59,7 @@ pub struct View<'a> {
     pub snap: &'a Snapshot,
     pub history: &'a History,
     pub app_history: &'a AppHistory,
+    pub proc_history: &'a ProcessHistory,
     pub settings: &'a Settings,
     /// Lower-cased search text.
     pub search: &'a str,

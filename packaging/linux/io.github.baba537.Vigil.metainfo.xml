@@ -34,6 +34,18 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-10-04">
+      <description>
+        <p>Temperatures and sensors everywhere, a redesigned and clearer interface, and lower resource usage.</p>
+        <ul>
+          <li>Temperatures for CPU (per core), memory, disks, network adapters and GPUs; a new Sensors view with fans, voltages and power</li>
+          <li>Battery view with charge, power draw, health and cycles</li>
+          <li>Clearer process list: filter chips, collapsible groups, overview tiles and a detail pane with live graphs</li>
+          <li>Tree view on the Details page, tabbed process properties (threads, open files, environment), CSV export</li>
+          <li>Fewer full process scans while the process list is not visible</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-01">
       <description>
         <p>First public release.</p>

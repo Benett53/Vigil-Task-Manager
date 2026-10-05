@@ -83,6 +83,11 @@ pub struct Collector {
     nvidia: Option<Nvidia>,
     last: Option<Instant>,
     seq: u64,
+    procs: Arc<Vec<Process>>,
+    procs_seq: u64,
+    last_proc_scan: Option<Instant>,
+    components: sysinfo::Components,
+    cpu_temp: Option<f32>,
 }
 
 impl Collector {
@@ -148,6 +153,11 @@ impl Collector {
             nvidia: Nvidia::init(),
             last: None,
             seq: 0,
+            procs: Arc::new(Vec::new()),
+            procs_seq: 0,
+            last_proc_scan: None,
+            components: sysinfo::Components::new(),
+            cpu_temp: None,
         }
     }
 
@@ -174,13 +184,25 @@ impl Collector {
         } else {
             Some(cpus.iter().map(|c| c.frequency() as f64).sum::<f64>() / cpus.len() as f64)
         };
+        // Thermal zones come from WMI (slow, and usually only readable as administrator),
+        // so they are queried every 5th refresh.
+        if self.seq % 5 == 1 {
+            self.components.refresh(true);
+            self.cpu_temp = self
+                .components
+                .list()
+                .iter()
+                .filter_map(|c| c.temperature())
+                .filter(|t| (1.0..150.0).contains(t))
+                .reduce(f32::max);
+        }
         let cpu = CpuSample {
             total: self.sys.global_cpu_usage(),
-            kernel: 0.0,
             per_core: cpus.iter().map(|c| c.cpu_usage()).collect(),
+            per_core_freq: cpus.iter().map(|c| c.frequency() as f32).collect(),
             freq_mhz: freq.filter(|f| *f > 0.0),
-            temperature: None,
-            load_avg: None,
+            temperature: self.cpu_temp,
+            ..Default::default()
         };
 
         let perf = performance_info();
@@ -204,33 +226,55 @@ impl Collector {
             swap_total: self.sys.total_swap(),
             swap_used: self.sys.used_swap(),
             compressed: None,
+            temperature: None,
         };
 
-        let procs = if with_processes {
-            self.sample_processes(elapsed)
-        } else {
-            Vec::new()
-        };
+        if with_processes || self.procs_seq == 0 {
+            let proc_elapsed = self
+                .last_proc_scan
+                .map(|l| now.duration_since(l).as_secs_f64())
+                .unwrap_or(1.0)
+                .max(0.05);
+            self.last_proc_scan = Some(now);
+            self.procs = Arc::new(self.sample_processes(proc_elapsed));
+            self.procs_seq += 1;
+        }
         let disks = self.sample_disks(elapsed);
         let nets = self.sample_nets(elapsed);
         let gpus = self.sample_gpus();
 
         Snapshot {
-            seq: self.seq,
             cpu,
             mem,
             disks,
             nets,
             gpus,
+            sensors: self
+                .components
+                .list()
+                .iter()
+                .filter_map(|c| {
+                    Some(crate::model::SensorReading {
+                        chip: "ACPI thermal zone".into(),
+                        label: c.label().to_owned(),
+                        kind: crate::model::SensorKind::Temperature,
+                        value: c.temperature()?,
+                        high: c.max(),
+                        crit: c.critical(),
+                    })
+                })
+                .collect(),
+            batteries: battery().into_iter().collect(),
             sys: SystemSample {
                 uptime_secs: System::uptime(),
                 processes: perf
                     .as_ref()
-                    .map_or(procs.len(), |p| p.ProcessCount as usize),
+                    .map_or(self.procs.len(), |p| p.ProcessCount as usize),
                 threads: perf.as_ref().map_or(0, |p| p.ThreadCount as usize),
                 handles: perf.as_ref().map(|p| p.HandleCount as u64),
             },
-            procs,
+            procs: self.procs.clone(),
+            procs_seq: self.procs_seq,
             info: self.info.clone(),
         }
     }
@@ -478,6 +522,7 @@ impl Collector {
                         crate::util::fmt_bytes(d.available_space())
                     )],
                     removable: d.is_removable(),
+                    temperature: None,
                 }
             })
             .collect()
@@ -543,6 +588,8 @@ impl Collector {
                     mac: n.mac_address().to_string(),
                     connected,
                     is_virtual,
+                    temperature: None,
+                    signal: None,
                 }
             })
             .collect();
@@ -568,6 +615,10 @@ impl Collector {
                 shared_mem_used: None,
                 temperature: g.temperature,
                 pci_slot: g.pci,
+                power_w: g.power_w,
+                fan_rpm: None,
+                fan_percent: g.fan_percent,
+                clock_mhz: g.clock_mhz,
             })
             .collect()
     }
@@ -585,6 +636,48 @@ fn map_status(s: sysinfo::ProcessStatus) -> ProcState {
         S::UninterruptibleDiskSleep => ProcState::DiskSleep,
         _ => ProcState::Unknown,
     }
+}
+
+/// Battery state from the Windows power API (laptops and UPS-backed desktops).
+fn battery() -> Option<crate::model::BatterySample> {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    // SAFETY: plain data struct filled by the API.
+    let st = unsafe {
+        let mut st: SYSTEM_POWER_STATUS = std::mem::zeroed();
+        if GetSystemPowerStatus(&mut st) == 0 {
+            return None;
+        }
+        st
+    };
+    // 128 = no system battery, 255 = unknown status.
+    if st.BatteryFlag & 128 != 0 || st.BatteryFlag == 255 || st.BatteryLifePercent > 100 {
+        return None;
+    }
+    let charging = st.BatteryFlag & 8 != 0;
+    let on_ac = match st.ACLineStatus {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    Some(crate::model::BatterySample {
+        id: "Battery".into(),
+        percent: st.BatteryLifePercent as f32,
+        status: if charging {
+            "Charging"
+        } else if on_ac == Some(true) {
+            if st.BatteryLifePercent >= 100 {
+                "Full"
+            } else {
+                "Not charging"
+            }
+        } else {
+            "Discharging"
+        }
+        .into(),
+        on_ac,
+        time_remaining_secs: (st.BatteryLifeTime != u32::MAX).then_some(st.BatteryLifeTime as u64),
+        ..Default::default()
+    })
 }
 
 fn performance_info() -> Option<PERFORMANCE_INFORMATION> {

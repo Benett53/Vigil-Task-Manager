@@ -1,9 +1,10 @@
 //! Disk and network adapter monitoring.
 
 use super::procfs::{DiskStat, parse_diskstats, parse_net_dev, read_into, read_trimmed, read_u64};
+use super::sensors::Sensors;
 use crate::model::{DiskSample, NetSample};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct DiskMonitor {
@@ -22,10 +23,12 @@ struct DiskMeta {
     capacity: u64,
     removable: bool,
     physical: bool,
+    /// Canonical sysfs path of the underlying device (for temperature sensors).
+    device: Option<PathBuf>,
 }
 
 impl DiskMonitor {
-    pub fn sample(&mut self, elapsed: f64) -> Vec<DiskSample> {
+    pub fn sample(&mut self, elapsed: f64, sensors: &Sensors) -> Vec<DiskSample> {
         if self.tick.is_multiple_of(15) {
             self.refresh_mounts();
         }
@@ -52,6 +55,10 @@ impl DiskMonitor {
                 removable: meta.removable,
                 mounts: self.mounts.get(name).cloned().unwrap_or_default(),
                 system_disk: self.system_disks.iter().any(|d| d == name),
+                temperature: meta
+                    .device
+                    .as_deref()
+                    .and_then(|d| sensors.temp_for_device(d)),
                 ..Default::default()
             };
             if let Some(p) = prev {
@@ -195,6 +202,7 @@ fn disk_meta(name: &str) -> DiskMeta {
         capacity,
         removable,
         physical,
+        device: std::fs::canonicalize(block.join("device")).ok(),
     }
 }
 
@@ -212,10 +220,12 @@ struct NetMeta {
     kind: String,
     is_virtual: bool,
     mac: String,
+    device: Option<PathBuf>,
+    link_mbps: Option<u64>,
 }
 
 impl NetMonitor {
-    pub fn sample(&mut self, elapsed: f64) -> Vec<NetSample> {
+    pub fn sample(&mut self, elapsed: f64, sensors: &Sensors) -> Vec<NetSample> {
         if self.tick.is_multiple_of(10) {
             self.addrs = interface_addresses();
             self.meta.clear(); // re-detect adapters occasionally (hotplug)
@@ -225,6 +235,7 @@ impl NetMonitor {
             return Vec::new();
         }
         let buf = std::mem::take(&mut self.buf);
+        let wireless = std::fs::read_to_string("/proc/net/wireless").unwrap_or_default();
         let mut out = Vec::new();
         for (name, rx, tx) in parse_net_dev(&buf) {
             if name == "lo" {
@@ -247,10 +258,6 @@ impl NetMonitor {
             let oper = read_trimmed(sys.join("operstate")).unwrap_or_default();
             let carrier = read_u64(sys.join("carrier")).unwrap_or(0) == 1;
             let connected = oper == "up" || (oper == "unknown" && carrier);
-            let link = read_trimmed(sys.join("speed"))
-                .and_then(|s| s.parse::<i64>().ok())
-                .filter(|s| *s > 0)
-                .map(|s| s as u64);
             let (ipv4, ipv6) = self.addrs.get(name).cloned().unwrap_or_default();
             out.push(NetSample {
                 id: name.to_owned(),
@@ -259,12 +266,17 @@ impl NetMonitor {
                 tx_bps,
                 rx_total: rx,
                 tx_total: tx,
-                link_mbps: link,
+                link_mbps: meta.link_mbps.filter(|_| connected),
                 ipv4,
                 ipv6,
                 mac: meta.mac,
                 connected,
                 is_virtual: meta.is_virtual,
+                temperature: meta
+                    .device
+                    .as_deref()
+                    .and_then(|d| sensors.temp_for_device(d)),
+                signal: wifi_signal(&wireless, name),
             });
         }
         self.buf = buf;
@@ -305,7 +317,30 @@ fn net_meta(name: &str) -> NetMeta {
         kind,
         is_virtual: !has_device,
         mac: read_trimmed(sys.join("address")).unwrap_or_default(),
+        device: std::fs::canonicalize(sys.join("device")).ok(),
+        link_mbps: read_trimmed(sys.join("speed"))
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|s| *s > 0)
+            .map(|s| s as u64),
     }
+}
+
+/// Link quality of a wireless interface from `/proc/net/wireless`, in percent.
+pub fn wifi_signal(wireless: &str, iface: &str) -> Option<f32> {
+    wireless.lines().skip(2).find_map(|line| {
+        let (name, rest) = line.split_once(':')?;
+        if name.trim() != iface {
+            return None;
+        }
+        // Columns: status, link quality, level, noise, ...
+        let quality: f32 = rest
+            .split_whitespace()
+            .nth(1)?
+            .trim_end_matches('.')
+            .parse()
+            .ok()?;
+        Some((quality / 70.0 * 100.0).clamp(0.0, 100.0))
+    })
 }
 
 /// IPv4/IPv6 addresses per interface via `getifaddrs`.
@@ -341,4 +376,16 @@ fn interface_addresses() -> HashMap<String, (Vec<String>, Vec<String>)> {
         libc::freeifaddrs(ifap);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wifi_signal;
+
+    #[test]
+    fn wireless_quality() {
+        let s = "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\n wlp2s0: 0000   56.  -54.  -256        0      0      0      0     15        0\n";
+        assert_eq!(wifi_signal(s, "wlp2s0"), Some(80.0));
+        assert_eq!(wifi_signal(s, "eth0"), None);
+    }
 }

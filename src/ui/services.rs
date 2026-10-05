@@ -6,6 +6,7 @@ use crate::model::{Service, ServiceAction};
 use crate::util::contains_ci;
 use egui::{Align, Layout, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
+use egui_phosphor::regular as icon;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -50,7 +51,10 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
-        if ui.button("⟳ Refresh").clicked() {
+        if ui
+            .button(format!("{} Refresh", icon::ARROWS_CLOCKWISE))
+            .clicked()
+        {
             actions.push(Action::RefreshServices);
         }
         if crate::platform::has_user_services() {
@@ -120,7 +124,7 @@ pub fn show(
 
     // Map service -> PIDs from the process list (cgroup on Linux, service name on Windows).
     let mut pids: HashMap<&str, Vec<u32>> = HashMap::new();
-    for p in &view.snap.procs {
+    for p in view.snap.procs.iter() {
         if let Some(unit) = &p.unit {
             pids.entry(unit.trim_end_matches(".service"))
                 .or_default()
@@ -269,16 +273,21 @@ pub fn show(
                         }
                         ui.separator();
                         if let Some(pid) = pid
-                            && ui.button("Go to details").clicked()
+                            && ui
+                                .button(format!("{} Go to details", icon::TABLE))
+                                .clicked()
                         {
                             actions.push(Action::GoToDetails(pid));
                             ui.close();
                         }
-                        if ui.button("Search online").clicked() {
+                        if ui
+                            .button(format!("{} Search online", icon::GLOBE))
+                            .clicked()
+                        {
                             actions.push(Action::SearchOnline(format!("{} service", s.name)));
                             ui.close();
                         }
-                        if ui.button("Copy name").clicked() {
+                        if ui.button(format!("{} Copy name", icon::COPY)).clicked() {
                             actions.push(Action::Copy(s.name.clone()));
                             ui.close();
                         }

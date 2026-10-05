@@ -8,6 +8,7 @@ use crate::model::{ProcKind, ProcSignal};
 use crate::util::{fmt_bytes, fmt_percent, fmt_rate};
 use egui::{Align, Layout, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
+use egui_phosphor::regular as icon;
 use std::collections::{BTreeMap, HashSet};
 
 pub struct State {
@@ -15,6 +16,8 @@ pub struct State {
     pub expanded: HashSet<u32>,
     pub selected: Option<u32>,
     full_names: BTreeMap<u32, Option<String>>,
+    #[allow(clippy::type_complexity)]
+    cache: Option<((u64, super::table::Sort, bool), Vec<UserAgg>)>,
 }
 
 impl Default for State {
@@ -24,6 +27,7 @@ impl Default for State {
             expanded: HashSet::new(),
             selected: None,
             full_names: BTreeMap::new(),
+            cache: None,
         }
     }
 }
@@ -39,7 +43,7 @@ struct UserAgg {
     has_session: bool,
 }
 
-pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<Action>) {
+fn aggregate(state: &mut State, view: &View<'_>) -> Vec<UserAgg> {
     let snap = view.snap;
     let mut users: BTreeMap<u32, UserAgg> = BTreeMap::new();
     for (i, p) in snap.procs.iter().enumerate() {
@@ -89,6 +93,23 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         u.procs
             .sort_by(|&x, &y| cmp_f64(snap.procs[y].cpu as f64, snap.procs[x].cpu as f64));
     }
+    list
+}
+
+pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<Action>) {
+    let snap = view.snap;
+    // Aggregate once per process scan, not on every repaint.
+    let key = (
+        snap.procs_seq,
+        state.sort,
+        view.settings.show_kernel_threads,
+    );
+    if state.cache.as_ref().is_none_or(|c| c.0 != key) {
+        let list = aggregate(state, view);
+        state.cache = Some((key, list));
+    }
+    let cache = state.cache.take().expect("built above");
+    let list = &cache.1;
 
     enum Row {
         User(usize),
@@ -175,9 +196,13 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                             row.col(|ui| {
                                 if ui
                                     .add(
-                                        egui::Button::new(if expanded { "⏷" } else { "⏵" })
-                                            .frame(false)
-                                            .small(),
+                                        egui::Button::new(if expanded {
+                                            icon::CARET_DOWN
+                                        } else {
+                                            icon::CARET_RIGHT
+                                        })
+                                        .frame(false)
+                                        .small(),
                                     )
                                     .clicked()
                                 {
@@ -195,6 +220,11 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                                 } else {
                                     label
                                 };
+                                ui.label(
+                                    RichText::new(icon::USER_CIRCLE)
+                                        .size(18.0)
+                                        .color(super::widgets::colors::ACCENT),
+                                );
                                 cell_label(ui, RichText::new(label).strong());
                             });
                             row.col(|ui| {
@@ -250,7 +280,11 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                                     ""
                                 };
                                 if ui
-                                    .button(format!("End all processes of {}{warn}", u.name))
+                                    .button(format!(
+                                        "{} End all processes of {}{warn}",
+                                        icon::X_CIRCLE,
+                                        u.name
+                                    ))
                                     .clicked()
                                 {
                                     actions.push(Action::Signal {
@@ -264,7 +298,10 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                                     });
                                     ui.close();
                                 }
-                                if ui.button("Copy user name").clicked() {
+                                if ui
+                                    .button(format!("{} Copy user name", icon::COPY))
+                                    .clicked()
+                                {
                                     actions.push(Action::Copy(u.name.clone()));
                                     ui.close();
                                 }
@@ -274,6 +311,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                             let p = &snap.procs[i];
                             row.col(|ui| {
                                 ui.add_space(40.0);
+                                super::widgets::avatar(ui, &p.name, 16.0, false);
                                 cell_label(ui, &*p.name);
                             });
                             row.col(|ui| {
@@ -304,6 +342,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                     });
                 });
         });
+    state.cache = Some(cache);
     state.sort = sort_state;
     if let Some(uid) = toggle
         && !state.expanded.remove(&uid)

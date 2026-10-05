@@ -6,6 +6,7 @@ use crate::model::StartupEntry;
 use crate::util::contains_ci;
 use egui::{Align, Layout, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
+use egui_phosphor::regular as icon;
 
 pub struct State {
     pub list: Option<Vec<StartupEntry>>,
@@ -33,7 +34,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         .as_ref()
         .and_then(|id| state.list.as_ref()?.iter().find(|e| &e.id == id).cloned());
     ui.horizontal(|ui| {
-        if ui.button("➕ Add…").clicked() {
+        if ui.button(format!("{} Add…", icon::PLUS)).clicked() {
             actions.push(Action::StartupAddDialog);
         }
         let (label, enable) = match &selected {
@@ -50,7 +51,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         if ui
             .add_enabled(
                 selected.as_ref().is_some_and(|e| e.removable),
-                egui::Button::new("Remove"),
+                egui::Button::new(format!("{} Remove", icon::TRASH)),
             )
             .on_hover_text("Only entries that belong to your user can be removed")
             .clicked()
@@ -58,7 +59,10 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         {
             actions.push(Action::StartupRemove(e.clone()));
         }
-        if ui.button("⟳ Refresh").clicked() {
+        if ui
+            .button(format!("{} Refresh", icon::ARROWS_CLOCKWISE))
+            .clicked()
+        {
             actions.push(Action::RefreshStartup);
         }
         if state.loading {
@@ -66,7 +70,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(b) = &state.boot_summary {
-                ui.label(RichText::new(format!("Last boot: {b}")).weak());
+                ui.label(RichText::new(format!("{} Last boot: {b}", icon::TIMER)).weak());
             }
         });
     });
@@ -95,7 +99,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         sort.apply(ord.then_with(|| cmp_str(&a.name, &b.name)))
     });
     if rows.is_empty() {
-        ui.label(RichText::new("No startup apps found.").weak());
+        ui.label(RichText::new(format!("{} No startup apps found. Use \"Add…\" to start a program automatically when you sign in.", icon::INFO)).weak());
         return;
     }
     let mut sort_state = state.sort;
@@ -163,19 +167,25 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                     if ui
                         .add_enabled(
                             !e.location.is_empty(),
-                            egui::Button::new("Open file location"),
+                            egui::Button::new(format!("{} Open file location", icon::FOLDER_OPEN)),
                         )
                         .clicked()
                     {
                         actions.push(Action::OpenLocation(e.location.clone()));
                         ui.close();
                     }
-                    if ui.button("Search online").clicked() {
+                    if ui
+                        .button(format!("{} Search online", icon::GLOBE))
+                        .clicked()
+                    {
                         actions.push(Action::SearchOnline(e.name.clone()));
                         ui.close();
                     }
                     if ui
-                        .add_enabled(!e.command.is_empty(), egui::Button::new("Copy command"))
+                        .add_enabled(
+                            !e.command.is_empty(),
+                            egui::Button::new(format!("{} Copy command", icon::COPY)),
+                        )
                         .clicked()
                     {
                         actions.push(Action::Copy(e.command.clone()));

@@ -10,6 +10,9 @@ pub struct NvGpu {
     pub mem_used: Option<u64>,
     pub mem_total: Option<u64>,
     pub temperature: Option<f32>,
+    pub power_w: Option<f32>,
+    pub fan_percent: Option<f32>,
+    pub clock_mhz: Option<f32>,
     pub driver: String,
     /// (pid, utilization %, memory bytes)
     pub procs: Vec<(u32, Option<f32>, Option<u64>)>,
@@ -80,6 +83,12 @@ mod imp {
                     .temperature(TemperatureSensor::Gpu)
                     .ok()
                     .map(|t| t as f32);
+                g.power_w = dev.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+                g.fan_percent = dev.fan_speed(0).ok().map(|p| p as f32);
+                g.clock_mhz = dev
+                    .clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
+                    .ok()
+                    .map(|c| c as f32);
                 if with_processes {
                     let mut procs: Vec<(u32, Option<f32>, Option<u64>)> = Vec::new();
                     let mut add_mem = |pid: u32, mem: &UsedGpuMemory| {

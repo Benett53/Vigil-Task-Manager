@@ -433,7 +433,65 @@ pub fn details(pid: u32) -> ProcessDetails {
                 .to_string(),
         );
     }
-    ProcessDetails { rows }
+    let mut open_files = Vec::new();
+    if let Ok(read) = std::fs::read_dir(format!("{base}/fd")) {
+        for ent in read.flatten().take(5000) {
+            let fd = ent.file_name().to_string_lossy().into_owned();
+            let target = std::fs::read_link(ent.path())
+                .map(|t| t.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            open_files.push((fd, target));
+        }
+        open_files.sort_by_key(|(fd, _)| fd.parse::<u64>().unwrap_or(u64::MAX));
+    }
+    let mut threads = Vec::new();
+    // SAFETY: sysconf is always safe to call.
+    let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    if let Ok(read) = std::fs::read_dir(format!("{base}/task")) {
+        for ent in read.flatten().take(5000) {
+            let Some(tid) = ent.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(ent.path().join("stat")) else {
+                continue;
+            };
+            if let Some(st) = parse_pid_stat(&stat) {
+                let state = match st.state {
+                    b'R' => "Running",
+                    b'S' => "Sleeping",
+                    b'D' => "Waiting (I/O)",
+                    b'T' | b't' => "Stopped",
+                    b'Z' => "Zombie",
+                    b'I' => "Idle",
+                    _ => "Unknown",
+                };
+                threads.push((
+                    tid,
+                    st.comm.to_owned(),
+                    state.to_owned(),
+                    (st.utime + st.stime) as f64 / tck,
+                ));
+            }
+        }
+        threads.sort_by_key(|t| t.0);
+    }
+    let environment = std::fs::read(format!("{base}/environ"))
+        .map(|raw| {
+            let mut v: Vec<String> = raw
+                .split(|b| *b == 0)
+                .filter(|e| !e.is_empty())
+                .map(|e| String::from_utf8_lossy(e).into_owned())
+                .collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
+    ProcessDetails {
+        rows,
+        open_files,
+        threads,
+        environment,
+    }
 }
 
 #[cfg(test)]

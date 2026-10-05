@@ -3,6 +3,7 @@
 use super::Action;
 use crate::model::{Priority, ProcSignal, ProcState, Process, Snapshot};
 use egui::Ui;
+use egui_phosphor::regular as icon;
 
 /// All descendants of `pid` (children first is not required; the caller sends signals in order).
 pub fn descendants(snap: &Snapshot, pid: u32) -> Vec<u32> {
@@ -32,7 +33,7 @@ pub fn process_menu(
     show_details_link: bool,
 ) {
     let target = format!("{} (PID {})", p.name, p.pid);
-    if ui.button("End task").clicked() {
+    if ui.button(format!("{} End task", icon::X_CIRCLE)).clicked() {
         actions.push(Action::Signal {
             pids: vec![p.pid],
             sig: ProcSignal::Terminate,
@@ -40,7 +41,10 @@ pub fn process_menu(
         });
         ui.close();
     }
-    if ui.button("End process tree").clicked() {
+    if ui
+        .button(format!("{} End process tree", icon::TREE_STRUCTURE))
+        .clicked()
+    {
         let mut pids = descendants(snap, p.pid);
         pids.reverse();
         pids.push(p.pid);
@@ -51,7 +55,7 @@ pub fn process_menu(
         });
         ui.close();
     }
-    if ui.button("Kill (force)").clicked() {
+    if ui.button(format!("{} Kill (force)", icon::SKULL)).clicked() {
         actions.push(Action::Signal {
             pids: vec![p.pid],
             sig: ProcSignal::Kill,
@@ -60,7 +64,7 @@ pub fn process_menu(
         ui.close();
     }
     if p.state == ProcState::Stopped {
-        if ui.button("Resume").clicked() {
+        if ui.button(format!("{} Resume", icon::PLAY)).clicked() {
             actions.push(Action::Signal {
                 pids: vec![p.pid],
                 sig: ProcSignal::Resume,
@@ -68,7 +72,7 @@ pub fn process_menu(
             });
             ui.close();
         }
-    } else if ui.button("Suspend").clicked() {
+    } else if ui.button(format!("{} Suspend", icon::PAUSE)).clicked() {
         actions.push(Action::Signal {
             pids: vec![p.pid],
             sig: ProcSignal::Suspend,
@@ -82,7 +86,7 @@ pub fn process_menu(
         actions.push(Action::SetEfficiency(vec![p.pid], eff));
         ui.close();
     }
-    ui.menu_button("Set priority", |ui| {
+    ui.menu_button(format!("{} Set priority", icon::SORT_ASCENDING), |ui| {
         let current = Priority::from_nice(p.nice);
         for prio in Priority::ALL {
             if ui.radio(current == prio, prio.label()).clicked() {
@@ -91,19 +95,24 @@ pub fn process_menu(
             }
         }
     });
-    if ui.button("Set affinity…").clicked() {
+    if ui.button(format!("{} Set affinity…", icon::CPU)).clicked() {
         actions.push(Action::OpenAffinity(p.pid, p.name.to_string()));
         ui.close();
     }
     ui.separator();
-    if show_details_link && ui.button("Go to details").clicked() {
+    if show_details_link
+        && ui
+            .button(format!("{} Go to details", icon::TABLE))
+            .clicked()
+    {
         actions.push(Action::GoToDetails(p.pid));
         ui.close();
     }
     if let Some(unit) = p.unit.as_deref().filter(|u| is_service(u))
         && ui
             .button(format!(
-                "Go to service ({})",
+                "{} Go to service ({})",
+                icon::GEAR_SIX,
                 unit.trim_end_matches(".service")
             ))
             .clicked()
@@ -114,17 +123,23 @@ pub fn process_menu(
         ui.close();
     }
     if ui
-        .add_enabled(!p.exe.is_empty(), egui::Button::new("Open file location"))
+        .add_enabled(
+            !p.exe.is_empty(),
+            egui::Button::new(format!("{} Open file location", icon::FOLDER_OPEN)),
+        )
         .clicked()
     {
         actions.push(Action::OpenLocation(p.exe.to_string()));
         ui.close();
     }
-    if ui.button("Search online").clicked() {
+    if ui
+        .button(format!("{} Search online", icon::GLOBE))
+        .clicked()
+    {
         actions.push(Action::SearchOnline(p.name.to_string()));
         ui.close();
     }
-    ui.menu_button("Copy", |ui| {
+    ui.menu_button(format!("{} Copy", icon::COPY), |ui| {
         copy_item(ui, "Name", &p.name, actions);
         copy_item(ui, "PID", &p.pid.to_string(), actions);
         copy_item(ui, "Executable path", &p.exe, actions);
@@ -141,7 +156,7 @@ pub fn process_menu(
         copy_item(ui, "All columns", &summary, actions);
     });
     ui.separator();
-    if ui.button("Properties").clicked() {
+    if ui.button(format!("{} Properties", icon::INFO)).clicked() {
         actions.push(Action::OpenProperties(p.pid, p.name.to_string()));
         ui.close();
     }
@@ -178,7 +193,7 @@ pub fn app_menu(
     }
     ui.separator();
     let pids: Vec<u32> = members.iter().map(|p| p.pid).collect();
-    if ui.button("End task").clicked() {
+    if ui.button(format!("{} End task", icon::X_CIRCLE)).clicked() {
         actions.push(Action::Signal {
             pids: pids.clone(),
             sig: ProcSignal::Terminate,
@@ -186,7 +201,7 @@ pub fn app_menu(
         });
         ui.close();
     }
-    if ui.button("Kill (force)").clicked() {
+    if ui.button(format!("{} Kill (force)", icon::SKULL)).clicked() {
         actions.push(Action::Signal {
             pids: pids.clone(),
             sig: ProcSignal::Kill,
@@ -196,9 +211,9 @@ pub fn app_menu(
     }
     let all_stopped = members.iter().all(|p| p.state == ProcState::Stopped);
     let (label, sig) = if all_stopped {
-        ("Resume", ProcSignal::Resume)
+        (format!("{} Resume", icon::PLAY), ProcSignal::Resume)
     } else {
-        ("Suspend", ProcSignal::Suspend)
+        (format!("{} Suspend", icon::PAUSE), ProcSignal::Suspend)
     };
     if ui.button(label).clicked() {
         actions.push(Action::Signal {
@@ -215,27 +230,33 @@ pub fn app_menu(
     }
     ui.separator();
     if let Some(first) = members.iter().min_by_key(|p| p.pid) {
-        if ui.button("Go to details").clicked() {
+        if ui
+            .button(format!("{} Go to details", icon::TABLE))
+            .clicked()
+        {
             actions.push(Action::GoToDetails(first.pid));
             ui.close();
         }
         if ui
             .add_enabled(
                 !first.exe.is_empty(),
-                egui::Button::new("Open file location"),
+                egui::Button::new(format!("{} Open file location", icon::FOLDER_OPEN)),
             )
             .clicked()
         {
             actions.push(Action::OpenLocation(first.exe.to_string()));
             ui.close();
         }
-        if ui.button("Search online").clicked() {
+        if ui
+            .button(format!("{} Search online", icon::GLOBE))
+            .clicked()
+        {
             actions.push(Action::SearchOnline(name.to_owned()));
             ui.close();
         }
         copy_item(ui, "Copy name", name, actions);
         ui.separator();
-        if ui.button("Properties").clicked() {
+        if ui.button(format!("{} Properties", icon::INFO)).clicked() {
             actions.push(Action::OpenProperties(first.pid, first.name.to_string()));
             ui.close();
         }

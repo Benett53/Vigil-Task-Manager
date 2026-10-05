@@ -108,8 +108,16 @@ pub struct CpuSample {
     pub per_core: Vec<f32>,
     /// Average current clock in MHz.
     pub freq_mhz: Option<f64>,
+    /// Current clock per logical processor in MHz (empty if unknown).
+    pub per_core_freq: Vec<f32>,
+    /// Package / die temperature in °C.
     pub temperature: Option<f32>,
+    /// Individual core / CCD temperatures (label, °C).
+    pub core_temps: Vec<(String, f32)>,
     pub load_avg: Option<[f32; 3]>,
+    /// Context switches and interrupts per second.
+    pub ctx_switches: Option<f64>,
+    pub interrupts: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,6 +140,8 @@ pub struct MemSample {
     pub swap_used: u64,
     /// Memory stored compressed (zswap / zram), if available.
     pub compressed: Option<u64>,
+    /// Temperature of the memory modules (DDR5 SPD hub / JC-42 sensors).
+    pub temperature: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -148,6 +158,7 @@ pub struct DiskSample {
     pub mounts: Vec<String>,
     pub system_disk: bool,
     pub removable: bool,
+    pub temperature: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -164,6 +175,9 @@ pub struct NetSample {
     pub mac: String,
     pub connected: bool,
     pub is_virtual: bool,
+    pub temperature: Option<f32>,
+    /// Wireless signal quality in percent, if this is a Wi-Fi adapter.
+    pub signal: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -178,6 +192,61 @@ pub struct GpuSample {
     pub shared_mem_used: Option<u64>,
     pub temperature: Option<f32>,
     pub pci_slot: String,
+    pub power_w: Option<f32>,
+    pub fan_rpm: Option<f32>,
+    pub fan_percent: Option<f32>,
+    pub clock_mhz: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(windows, allow(dead_code))]
+pub enum SensorKind {
+    Temperature,
+    Fan,
+    Power,
+    Voltage,
+    Current,
+}
+
+/// One hardware sensor reading (hwmon on Linux).
+#[derive(Clone, Debug)]
+pub struct SensorReading {
+    /// Human friendly name of the chip ("CPU (AMD)", "NVMe SSD", ...).
+    pub chip: String,
+    pub label: String,
+    pub kind: SensorKind,
+    pub value: f32,
+    pub high: Option<f32>,
+    pub crit: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BatterySample {
+    pub id: String,
+    pub model: String,
+    pub percent: f32,
+    /// "Charging", "Discharging", "Full", "Not charging", ...
+    pub status: String,
+    pub on_ac: Option<bool>,
+    /// Charge/discharge power in watts (always positive).
+    pub power_w: Option<f32>,
+    pub energy_wh: Option<f32>,
+    pub energy_full_wh: Option<f32>,
+    pub energy_design_wh: Option<f32>,
+    pub cycles: Option<u32>,
+    /// Estimated time until empty (discharging) or full (charging).
+    pub time_remaining_secs: Option<u64>,
+    pub temperature: Option<f32>,
+}
+
+impl BatterySample {
+    /// Remaining capacity compared to the design capacity, in percent.
+    pub fn health(&self) -> Option<f32> {
+        match (self.energy_full_wh, self.energy_design_wh) {
+            (Some(f), Some(d)) if d > 0.0 => Some((f / d * 100.0).min(100.0)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -215,28 +284,35 @@ pub struct StaticInfo {
 
 #[derive(Clone, Debug)]
 pub struct Snapshot {
-    pub seq: u64,
     pub cpu: CpuSample,
     pub mem: MemSample,
     pub disks: Vec<DiskSample>,
     pub nets: Vec<NetSample>,
     pub gpus: Vec<GpuSample>,
+    pub sensors: Vec<SensorReading>,
+    pub batteries: Vec<BatterySample>,
     pub sys: SystemSample,
-    pub procs: Vec<Process>,
+    /// Process list; shared between snapshots when a refresh skipped process scanning.
+    pub procs: Arc<Vec<Process>>,
+    /// Increases whenever `procs` was rescanned (used to invalidate caches and to
+    /// account app history exactly once per scan).
+    pub procs_seq: u64,
     pub info: Arc<StaticInfo>,
 }
 
 impl Snapshot {
     pub fn empty(info: Arc<StaticInfo>) -> Self {
         Snapshot {
-            seq: 0,
             cpu: CpuSample::default(),
             mem: MemSample::default(),
             disks: Vec::new(),
             nets: Vec::new(),
             gpus: Vec::new(),
+            sensors: Vec::new(),
+            batteries: Vec::new(),
             sys: SystemSample::default(),
-            procs: Vec::new(),
+            procs: Arc::new(Vec::new()),
+            procs_seq: 0,
             info,
         }
     }
@@ -393,4 +469,10 @@ impl ServiceAction {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessDetails {
     pub rows: Vec<(String, String)>,
+    /// (descriptor, target) — empty if not readable.
+    pub open_files: Vec<(String, String)>,
+    /// (thread id, name, state, CPU seconds)
+    pub threads: Vec<(u32, String, String, f64)>,
+    /// `KEY=value` entries.
+    pub environment: Vec<String>,
 }

@@ -1,7 +1,7 @@
 //! Application shell: navigation, header, status bar, settings application and the
 //! execution of user actions (in background threads so the UI never blocks).
 
-use crate::history::{AppHistory, History};
+use crate::history::{AppHistory, History, ProcessHistory};
 use crate::model::{ProcSignal, ProcessDetails, Service, Snapshot, StartupEntry, StaticInfo};
 use crate::platform::{self, ActionError, ActionResult};
 use crate::sampler::{Command, Sampler};
@@ -9,8 +9,10 @@ use crate::settings::{Page, ProcessColumns, Settings, ThemeChoice, UpdateSpeed};
 use crate::ui::dialogs::{
     AffinityDialog, Confirm, Dialogs, Outcome, PropertiesWindow, Retry, RunTask,
 };
+use crate::ui::widgets::{colors, fmt_temp, meter};
 use crate::ui::{self, Action, View, theme};
 use egui::{Align, Key, Layout, Modifiers, RichText, Ui, ViewportCommand};
+use egui_phosphor::regular as icon;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -55,6 +57,7 @@ pub struct VigilApp {
     has_data: bool,
     history: History,
     app_history: AppHistory,
+    proc_history: ProcessHistory,
     search: String,
     search_lower: String,
     focus_search: bool,
@@ -72,6 +75,7 @@ pub struct VigilApp {
     ctx: egui::Context,
     can_elevate: bool,
     running_jobs: usize,
+    process_every: u32,
 }
 
 impl VigilApp {
@@ -103,6 +107,7 @@ impl VigilApp {
             has_data: false,
             history: History::default(),
             app_history,
+            proc_history: ProcessHistory::default(),
             search: String::new(),
             search_lower: String::new(),
             focus_search: false,
@@ -120,6 +125,7 @@ impl VigilApp {
             ctx,
             can_elevate: platform::can_elevate(),
             running_jobs: 0,
+            process_every: 1,
         }
     }
 
@@ -154,13 +160,36 @@ impl VigilApp {
     fn pump(&mut self) {
         for snap in self.sampler.drain() {
             self.history.record(&snap, self.settings.graph_points);
-            self.app_history.record(&snap);
+            // Process lists are reused between throttled scans; count each scan once.
+            if snap.procs_seq != self.snap.procs_seq {
+                self.app_history.record(&snap);
+                self.record_selection(&snap);
+            }
             self.snap = snap;
             self.has_data = true;
         }
         while let Ok(job) = self.jobs_rx.try_recv() {
             self.running_jobs = self.running_jobs.saturating_sub(1);
             self.handle_job(job);
+        }
+    }
+
+    /// Tracks CPU/memory/disk of the selected process for the detail pane graphs.
+    fn record_selection(&mut self, snap: &Snapshot) {
+        let sel = self.processes.selected.clone();
+        if self.proc_history.key != sel {
+            self.proc_history = ProcessHistory {
+                key: sel.clone(),
+                ..Default::default()
+            };
+        }
+        if let Some(sel) = sel
+            && let Some((cpu, mem, disk)) = ui::processes::selection_values(&sel, &snap.procs)
+        {
+            let cap = self.settings.graph_points;
+            self.proc_history.cpu.push(cpu, cap);
+            self.proc_history.mem.push(mem as f32, cap);
+            self.proc_history.disk.push(disk as f32, cap);
         }
     }
 
@@ -269,6 +298,8 @@ impl VigilApp {
                         name,
                         details: None,
                         open: true,
+                        tab: Default::default(),
+                        filter: String::new(),
                     });
                 }
                 self.spawn_job(move || JobResult::Details(pid, platform::process_details(pid)));
@@ -365,6 +396,29 @@ impl VigilApp {
                 self.set_status("Usage history deleted".into(), false);
             }
             Action::RefreshNow => self.sampler.send(Command::RefreshNow),
+            Action::ShowPerformance(sel) => {
+                self.page = Page::Performance;
+                self.performance.selected = sel;
+            }
+            Action::ExportCsv => {
+                let procs = self.snap.procs.clone();
+                self.spawn_job(move || {
+                    let result = crate::export::write_csv(&procs);
+                    JobResult::Done {
+                        what: match &result {
+                            Ok(path) => {
+                                format!("Exported {} processes to {}", procs.len(), path.display())
+                            }
+                            Err(_) => "Export process list".into(),
+                        },
+                        result: result
+                            .map(|_| ())
+                            .map_err(|e| ActionError::Other(e.to_string())),
+                        retry: None,
+                        refresh: Refresh::None,
+                    }
+                });
+            }
         }
     }
 
@@ -511,6 +565,7 @@ impl VigilApp {
             snap: &self.snap,
             history: &self.history,
             app_history: &self.app_history,
+            proc_history: &self.proc_history,
             settings: &self.settings,
             search: &self.search_lower,
         }
@@ -603,6 +658,7 @@ impl VigilApp {
                         snap: &snap,
                         history: &self.history,
                         app_history: &self.app_history,
+                        proc_history: &self.proc_history,
                         settings: &self.settings,
                         search: &self.search_lower,
                     };
@@ -616,58 +672,130 @@ impl VigilApp {
 
     fn nav_rail(&mut self, ui: &mut Ui) {
         let collapsed = self.settings.nav_collapsed;
-        let width = if collapsed { 52.0 } else { 196.0 };
+        let width = if collapsed { 56.0 } else { 204.0 };
+        let dark = ui.visuals().dark_mode;
         egui::Panel::left("nav")
             .resizable(false)
             .exact_size(width)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::nav_fill(ui.visuals().dark_mode))
-                    .inner_margin(6.0),
+                    .fill(theme::nav_fill(dark))
+                    .inner_margin(egui::Margin::symmetric(8, 10)),
             )
             .show(ui, |ui| {
-                ui.add_space(2.0);
-                if ui
-                    .add(egui::Button::new(RichText::new("☰").size(18.0)).frame(false))
-                    .on_hover_text(if collapsed {
-                        "Expand navigation"
-                    } else {
-                        "Collapse navigation"
-                    })
-                    .clicked()
-                {
-                    self.settings.nav_collapsed = !collapsed;
-                }
-                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new(icon::LIST).size(18.0)).frame(false))
+                        .on_hover_text(if collapsed {
+                            "Expand navigation"
+                        } else {
+                            "Collapse navigation"
+                        })
+                        .clicked()
+                    {
+                        self.settings.nav_collapsed = !collapsed;
+                    }
+                    if !collapsed {
+                        ui.label(RichText::new("Vigil").size(16.0).strong());
+                    }
+                });
+                ui.add_space(12.0);
                 for (i, page) in Page::MAIN.into_iter().enumerate() {
                     self.nav_button(ui, page, collapsed, Some(i + 1));
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    ui.add_space(4.0);
                     self.nav_button(ui, Page::Settings, collapsed, None);
+                    if !collapsed {
+                        ui.add_space(6.0);
+                        self.nav_summary(ui);
+                    }
                 });
             });
     }
 
+    /// Small live summary at the bottom of the navigation rail.
+    fn nav_summary(&self, ui: &mut Ui) {
+        let s = &self.snap;
+        let mem = s.mem.used as f32 / s.mem.total.max(1) as f32;
+        let w = ui.available_width();
+        for (label, frac, color, extra) in [
+            (
+                "CPU",
+                s.cpu.total / 100.0,
+                colors::CPU,
+                s.cpu.temperature.map(fmt_temp).unwrap_or_default(),
+            ),
+            ("Memory", mem, colors::MEMORY, String::new()),
+        ]
+        .into_iter()
+        .rev()
+        {
+            meter(ui, w, frac, color);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).small().weak());
+                ui.label(RichText::new(format!("{:.0}%", frac * 100.0)).small());
+                if !extra.is_empty() {
+                    ui.label(RichText::new(extra).small().weak());
+                }
+            });
+        }
+    }
+
     fn nav_button(&mut self, ui: &mut Ui, page: Page, collapsed: bool, shortcut: Option<usize>) {
         let selected = self.page == page;
-        let text = if collapsed {
-            RichText::new(page.icon()).size(16.0)
+        let dark = ui.visuals().dark_mode;
+        let size = egui::vec2(ui.available_width(), 36.0);
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        let fill = if selected {
+            colors::ACCENT.gamma_multiply(if dark { 0.22 } else { 0.14 })
+        } else if resp.hovered() {
+            ui.visuals().widgets.hovered.weak_bg_fill
         } else {
-            RichText::new(format!("{}   {}", page.icon(), page.title())).size(14.0)
+            egui::Color32::TRANSPARENT
         };
-        let button = egui::Button::new(text)
-            .selected(selected)
-            .frame(selected)
-            .min_size(egui::vec2(ui.available_width(), 34.0));
-        let mut resp = ui.add(button);
-        if collapsed || shortcut.is_some() {
-            let hint = match shortcut {
-                Some(n) => format!("{}  (Ctrl+{n})", page.title()),
-                None => format!("{}  (Ctrl+,)", page.title()),
-            };
-            resp = resp.on_hover_text(hint);
+        ui.painter().rect_filled(rect, 8.0, fill);
+        if selected {
+            let bar = egui::Rect::from_min_size(
+                rect.left_center() - egui::vec2(0.0, 8.0),
+                egui::vec2(3.0, 16.0),
+            );
+            ui.painter().rect_filled(bar, 1.5, colors::ACCENT);
         }
+        let fg = if selected {
+            if dark {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(10, 60, 58)
+            }
+        } else {
+            ui.visuals().text_color()
+        };
+        let icon_pos =
+            rect.left_center() + egui::vec2(if collapsed { size.x / 2.0 } else { 18.0 }, 0.0);
+        ui.painter().text(
+            icon_pos,
+            egui::Align2::CENTER_CENTER,
+            page.icon(),
+            egui::FontId::proportional(17.0),
+            if selected { colors::ACCENT } else { fg },
+        );
+        if !collapsed {
+            ui.painter().text(
+                rect.left_center() + egui::vec2(38.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                page.title(),
+                egui::FontId::proportional(14.0),
+                fg,
+            );
+        }
+        let hint = match shortcut {
+            Some(n) => format!("{}  (Ctrl+{n})", page.title()),
+            None => format!("{}  (Ctrl+,)", page.title()),
+        };
+        let resp = resp
+            .on_hover_text(hint)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.clicked() {
             self.page = page;
             if page == Page::Startup && self.startup.list.is_none() {
@@ -678,33 +806,62 @@ impl VigilApp {
 
     fn header(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         egui::Panel::top("header")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 12,
+                        top: 10,
+                        bottom: 6,
+                    }),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.page.title()).size(20.0).strong());
-                    ui.add_space(16.0);
+                    ui.label(RichText::new(self.page.title()).size(21.0).strong());
+                    ui.add_space(14.0);
                     if self.page != Page::Settings {
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut self.search)
-                                .hint_text("🔍 Search name, PID, user or command  (Ctrl+F)")
-                                .desired_width(ui.available_width().min(380.0)),
-                        );
-                        if self.focus_search {
-                            edit.request_focus();
-                            self.focus_search = false;
-                        }
-                        if edit.changed() {
-                            self.search_lower = self.search.trim().to_lowercase();
-                        }
-                        if !self.search.is_empty()
-                            && ui.small_button("✖").on_hover_text("Clear search").clicked()
-                        {
-                            self.clear_search();
-                        }
+                        let dark = ui.visuals().dark_mode;
+                        // Leave room for the page's toolbar on the right.
+                        let reserve = match self.page {
+                            Page::Processes | Page::Details => 500.0,
+                            _ => 190.0,
+                        };
+                        let search_width = (ui.available_width() - reserve).clamp(120.0, 340.0);
+                        egui::Frame::new()
+                            .fill(ui.visuals().extreme_bg_color)
+                            .stroke(theme::card_stroke(dark))
+                            .corner_radius(16.0)
+                            .inner_margin(egui::Margin::symmetric(10, 3))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(icon::MAGNIFYING_GLASS).weak());
+                                    let edit = ui.add(
+                                        egui::TextEdit::singleline(&mut self.search)
+                                            .hint_text(
+                                                "Search name, PID, user or command  (Ctrl+F)",
+                                            )
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(search_width),
+                                    );
+                                    if self.focus_search {
+                                        edit.request_focus();
+                                        self.focus_search = false;
+                                    }
+                                    if edit.changed() {
+                                        self.search_lower = self.search.trim().to_lowercase();
+                                    }
+                                    if !self.search.is_empty()
+                                        && ui
+                                            .add(egui::Button::new(icon::X).frame(false).small())
+                                            .on_hover_text("Clear search")
+                                            .clicked()
+                                    {
+                                        self.clear_search();
+                                    }
+                                });
+                            });
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         self.more_menu(ui, actions);
@@ -719,12 +876,13 @@ impl VigilApp {
             snap: &self.snap,
             history: &self.history,
             app_history: &self.app_history,
+            proc_history: &self.proc_history,
             settings: &self.settings,
             search: &self.search_lower,
         };
         match self.page {
             Page::Processes | Page::Details => {
-                let (columns_label, details) = ("Columns", self.page == Page::Details);
+                let details = self.page == Page::Details;
                 let end = if details {
                     self.details.end_task_action(&view)
                 } else {
@@ -741,57 +899,75 @@ impl VigilApp {
                 let mut group = self.settings.group_by_type;
                 let mut kernel = self.settings.show_kernel_threads;
                 let mut heat = self.settings.heatmap;
+                let mut overview = self.settings.show_overview;
+                let mut detail_pane = self.settings.show_process_details;
+                let mut tree = self.settings.details_tree;
                 let mut expand_all = None;
                 let mut cols = if details {
                     self.settings.details_columns.clone()
                 } else {
                     self.settings.processes_columns.clone()
                 };
-                ui.menu_button(format!("{columns_label} ⏷"), |ui| {
-                    for (label, flag) in cols.toggles() {
-                        ui.checkbox(flag, label);
-                    }
-                    ui.separator();
-                    if ui.button("Reset columns").clicked() {
-                        cols = if details {
-                            ProcessColumns::details_default()
-                        } else {
-                            ProcessColumns::default()
-                        };
-                    }
-                });
-                if !details {
-                    ui.menu_button("View ⏷", |ui| {
+                ui.menu_button(format!("{} View", icon::SLIDERS_HORIZONTAL), |ui| {
+                    if details {
+                        ui.checkbox(&mut tree, "Show as process tree");
+                    } else {
                         ui.checkbox(&mut group, "Group by type");
+                        ui.checkbox(&mut overview, "Show resource overview");
+                        ui.checkbox(&mut detail_pane, "Show details of the selection");
                         ui.checkbox(&mut heat, "Heat map colors");
-                        ui.checkbox(&mut kernel, "Show kernel threads");
+                    }
+                    ui.checkbox(&mut kernel, "Show kernel threads");
+                    ui.separator();
+                    ui.menu_button(format!("{} Columns", icon::COLUMNS), |ui| {
+                        for (label, flag) in cols.toggles() {
+                            ui.checkbox(flag, label);
+                        }
                         ui.separator();
-                        if ui.button("Expand all").clicked() {
+                        if ui.button("Reset columns").clicked() {
+                            cols = if details {
+                                ProcessColumns::details_default()
+                            } else {
+                                ProcessColumns::default()
+                            };
+                        }
+                    });
+                    if !details {
+                        ui.separator();
+                        if ui
+                            .button(format!("{} Expand all", icon::ARROWS_OUT_SIMPLE))
+                            .clicked()
+                        {
                             expand_all = Some(true);
                             ui.close();
                         }
-                        if ui.button("Collapse all").clicked() {
+                        if ui
+                            .button(format!("{} Collapse all", icon::ARROWS_IN_SIMPLE))
+                            .clicked()
+                        {
                             expand_all = Some(false);
                             ui.close();
                         }
-                    });
-                } else {
-                    ui.checkbox(&mut kernel, "Kernel threads");
-                }
-                let eff_label = match &selection {
-                    Some((_, true)) => "🍃 Efficiency mode ✔",
-                    _ => "🍃 Efficiency mode",
-                };
-                if ui
-                    .add_enabled(selection.is_some(), egui::Button::new(eff_label))
-                    .on_hover_text("Lower the priority of the selected process (nice 19, idle I/O) to save resources")
-                    .clicked()
-                    && let Some((pids, on)) = selection {
-                        actions.push(Action::SetEfficiency(pids, !on));
                     }
+                });
+                let eff_on = matches!(&selection, Some((_, true)));
                 if ui
-                    .add_enabled(end.is_some(), egui::Button::new("⛔ End task"))
-                    .on_hover_text("Delete")
+                    .add_enabled(
+                        selection.is_some(),
+                        egui::Button::new(format!("{} Efficiency mode", icon::LEAF)).selected(eff_on),
+                    )
+                    .on_hover_text("Lower the priority of the selection to save energy and keep other apps responsive")
+                    .clicked()
+                    && let Some((pids, on)) = selection
+                {
+                    actions.push(Action::SetEfficiency(pids, !on));
+                }
+                if ui
+                    .add_enabled(
+                        end.is_some(),
+                        egui::Button::new(format!("{} End task", icon::X_CIRCLE)),
+                    )
+                    .on_hover_text("End the selected task (Delete)")
                     .clicked()
                 {
                     actions.extend(end);
@@ -802,6 +978,9 @@ impl VigilApp {
                 self.settings.group_by_type = group;
                 self.settings.show_kernel_threads = kernel;
                 self.settings.heatmap = heat;
+                self.settings.show_overview = overview;
+                self.settings.show_process_details = detail_pane;
+                self.settings.details_tree = tree;
                 if details {
                     self.settings.details_columns = cols;
                 } else {
@@ -812,8 +991,14 @@ impl VigilApp {
         }
         if self.page != Page::Settings
             && ui
-                .button("▶ Run new task")
-                .on_hover_text("Ctrl+N")
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("{} Run new task", icon::PLAY))
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(colors::ACCENT),
+                )
+                .on_hover_text("Start a program (Ctrl+N)")
                 .clicked()
         {
             actions.push(Action::RunTaskDialog);
@@ -821,12 +1006,15 @@ impl VigilApp {
     }
 
     fn more_menu(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        ui.menu_button(RichText::new("…").size(18.0), |ui| {
-            if ui.button("Refresh now  (F5)").clicked() {
+        ui.menu_button(RichText::new(icon::DOTS_THREE_OUTLINE).size(16.0), |ui| {
+            if ui
+                .button(format!("{} Refresh now  (F5)", icon::ARROWS_CLOCKWISE))
+                .clicked()
+            {
                 actions.push(Action::RefreshNow);
                 ui.close();
             }
-            ui.menu_button("Update speed", |ui| {
+            ui.menu_button(format!("{} Update speed", icon::TIMER), |ui| {
                 for s in UpdateSpeed::ALL {
                     if ui
                         .radio(self.settings.update_speed == s, s.label())
@@ -839,16 +1027,30 @@ impl VigilApp {
             });
             ui.checkbox(&mut self.settings.always_on_top, "Always on top");
             ui.separator();
-            if ui.button("Keyboard shortcuts").clicked() {
+            if ui
+                .button(format!("{} Export process list (CSV)", icon::FILE_CSV))
+                .clicked()
+            {
+                actions.push(Action::ExportCsv);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(format!("{} Keyboard shortcuts", icon::KEYBOARD))
+                .clicked()
+            {
                 self.dialogs.shortcuts = true;
                 ui.close();
             }
-            if ui.button("About Vigil").clicked() {
+            if ui.button(format!("{} About Vigil", icon::INFO)).clicked() {
                 self.dialogs.about = true;
                 ui.close();
             }
             ui.separator();
-            if ui.button("Quit  (Ctrl+Q)").clicked() {
+            if ui
+                .button(format!("{} Quit  (Ctrl+Q)", icon::POWER))
+                .clicked()
+            {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
             }
         });
@@ -856,52 +1058,69 @@ impl VigilApp {
 
     fn status_bar(&mut self, ui: &mut Ui) {
         egui::Panel::bottom("status")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
+                    .inner_margin(egui::Margin::symmetric(14, 5)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let s = &self.snap;
                     let mem_pct = s.mem.used as f64 / s.mem.total.max(1) as f64 * 100.0;
-                    let weak = |t: String| RichText::new(t).small().weak();
-                    ui.label(weak(format!("Processes: {}", s.sys.processes)));
-                    ui.separator();
-                    ui.label(weak(format!("CPU: {:.0}%", s.cpu.total)));
-                    ui.separator();
-                    ui.label(weak(format!("Memory: {mem_pct:.0}%")));
-                    ui.separator();
-                    ui.label(weak(format!(
-                        "Up time: {}",
-                        crate::util::fmt_uptime(s.sys.uptime_secs)
-                    )));
+                    let item = |ui: &mut Ui, ic: &str, text: String| {
+                        ui.label(RichText::new(ic).small().color(colors::ACCENT));
+                        ui.label(RichText::new(text).small().weak());
+                        ui.add_space(6.0);
+                    };
+                    item(
+                        ui,
+                        icon::LIST_BULLETS,
+                        format!("{} processes", s.sys.processes),
+                    );
+                    item(ui, icon::CPU, format!("CPU {:.0}%", s.cpu.total));
+                    if let Some(t) = s.cpu.temperature {
+                        item(ui, icon::THERMOMETER_SIMPLE, fmt_temp(t));
+                    }
+                    item(ui, icon::MEMORY, format!("Memory {mem_pct:.0}%"));
+                    if let Some(b) = s.batteries.first() {
+                        item(
+                            ui,
+                            icon::BATTERY_HIGH,
+                            format!("{:.0}%  {}", b.percent, b.status),
+                        );
+                    }
+                    item(
+                        ui,
+                        icon::CLOCK,
+                        format!("Up {}", crate::util::fmt_uptime(s.sys.uptime_secs)),
+                    );
                     if self.settings.update_speed == UpdateSpeed::Paused {
-                        ui.separator();
                         ui.label(
-                            RichText::new("⏸ Updates paused")
+                            RichText::new(format!("{} Updates paused", icon::PAUSE))
                                 .small()
-                                .color(ui.visuals().warn_fg_color),
+                                .color(colors::WARN),
                         );
                     }
                     if self.running_jobs > 0 {
-                        ui.separator();
                         ui.spinner();
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some((msg, at, err)) = &self.status {
                             let age = at.elapsed();
-                            if age < Duration::from_secs(6) {
-                                let color = if *err {
-                                    ui.visuals().error_fg_color
+                            if age < Duration::from_secs(8) {
+                                let (ic, color) = if *err {
+                                    (icon::WARNING, colors::DANGER)
                                 } else {
-                                    ui.visuals().weak_text_color()
+                                    (icon::CHECK_CIRCLE, colors::GOOD)
                                 };
                                 ui.add(
-                                    egui::Label::new(RichText::new(msg).small().color(color))
-                                        .truncate(),
+                                    egui::Label::new(
+                                        RichText::new(format!("{ic} {msg}")).small().color(color),
+                                    )
+                                    .truncate(),
                                 );
-                                ui.ctx().request_repaint_after(Duration::from_secs(6) - age);
+                                ui.ctx().request_repaint_after(Duration::from_secs(8) - age);
                             }
                         }
                     });
@@ -911,8 +1130,21 @@ impl VigilApp {
 }
 
 impl eframe::App for VigilApp {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        // Only pages that show per-process data need a full process scan every refresh.
+        // Elsewhere (and while the window is hidden) processes are rescanned every 5th
+        // refresh, which keeps App history accurate at a fraction of the cost.
+        let hidden = ctx.input(|i| {
+            let v = i.viewport();
+            v.minimized == Some(true) || v.occluded == Some(true)
+        });
+        let wants_processes = matches!(self.page, Page::Processes | Page::Details | Page::Users);
+        let every = if wants_processes && !hidden { 1 } else { 5 };
+        if every != self.process_every {
+            self.process_every = every;
+            self.sampler.send(Command::SetProcessEvery(every));
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -953,6 +1185,7 @@ impl eframe::App for VigilApp {
                 snap: &snap,
                 history: &self.history,
                 app_history: &self.app_history,
+                proc_history: &self.proc_history,
                 settings: &self.settings,
                 search: &self.search_lower,
             };
