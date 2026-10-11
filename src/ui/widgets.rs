@@ -3,8 +3,8 @@
 use super::theme;
 use crate::history::Series;
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Mesh, Pos2, Rect, RichText, Sense, Shape, Stroke,
-    StrokeKind, Ui, Vec2, pos2, vec2,
+    Color32, CornerRadius, FontId, Mesh, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind,
+    Ui, Vec2, pos2, vec2,
 };
 
 pub mod colors {
@@ -31,9 +31,9 @@ pub struct Line<'a> {
 
 fn graph_bg(dark: bool) -> Color32 {
     if dark {
-        Color32::from_rgb(25, 26, 29)
+        Color32::from_rgb(26, 27, 30)
     } else {
-        Color32::WHITE
+        Color32::from_rgb(252, 252, 253)
     }
 }
 
@@ -56,14 +56,10 @@ pub fn graph(
     let radius = CornerRadius::same(6);
     painter.rect_filled(rect, radius, graph_bg(dark));
 
-    let grid = frame_color.gamma_multiply(if dark { 0.16 } else { 0.13 });
-    for i in 1..5 {
-        let y = rect.top() + rect.height() * i as f32 / 5.0;
+    let grid = frame_color.gamma_multiply(if dark { 0.10 } else { 0.09 });
+    for i in 1..4 {
+        let y = (rect.top() + rect.height() * i as f32 / 4.0).round() + 0.5;
         painter.hline(rect.x_range(), y, Stroke::new(1.0, grid));
-    }
-    for i in 1..6 {
-        let x = rect.left() + rect.width() * i as f32 / 6.0;
-        painter.vline(x, rect.y_range(), Stroke::new(1.0, grid));
     }
 
     let max = if max.is_finite() && max > 0.0 {
@@ -101,12 +97,12 @@ pub fn graph(
         if line.dashed {
             clip.extend(Shape::dashed_line(
                 &points,
-                Stroke::new(1.2, line.color),
+                Stroke::new(1.0, line.color.gamma_multiply(0.8)),
                 4.0,
                 3.0,
             ));
         } else {
-            clip.add(Shape::line(points, Stroke::new(1.8, line.color)));
+            clip.add(Shape::line(points, Stroke::new(1.5, line.color)));
         }
     }
 
@@ -144,7 +140,10 @@ pub fn graph(
     painter.rect_stroke(
         rect,
         radius,
-        Stroke::new(1.0, frame_color.gamma_multiply(0.8)),
+        Stroke::new(
+            1.0,
+            frame_color.gamma_multiply(if dark { 0.35 } else { 0.4 }),
+        ),
         StrokeKind::Inside,
     );
     response
@@ -154,11 +153,11 @@ pub fn graph(
 fn area_mesh(points: &[Pos2], top: f32, baseline: f32, color: Color32, dark: bool) -> Mesh {
     let mut mesh = Mesh::default();
     let h = (baseline - top).max(1.0);
-    let strong = if dark { 0.42 } else { 0.32 };
+    let strong = if dark { 0.30 } else { 0.22 };
     for p in points {
         let t = ((baseline - p.y) / h).clamp(0.0, 1.0);
-        mesh.colored_vertex(*p, color.gamma_multiply(0.08 + strong * t));
-        mesh.colored_vertex(pos2(p.x, baseline), color.gamma_multiply(0.04));
+        mesh.colored_vertex(*p, color.gamma_multiply(0.06 + strong * t));
+        mesh.colored_vertex(pos2(p.x, baseline), color.gamma_multiply(0.02));
     }
     for i in 0..(points.len() as u32 - 1) {
         let a = i * 2;
@@ -181,7 +180,11 @@ pub fn sparkline(
     let (response, painter) = ui.allocate_painter(size, Sense::hover());
     let rect = response.rect;
     let dark = ui.visuals().dark_mode;
-    painter.rect_filled(rect, 4.0, graph_bg(dark));
+    painter.hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, color.gamma_multiply(0.25)),
+    );
     let max = if max > 0.0 { max } else { 1.0 };
     let step = rect.width() / (capacity.max(2) - 1) as f32;
     let clip = painter.with_clip_rect(rect.shrink(1.0));
@@ -208,43 +211,39 @@ pub fn sparkline(
                 color,
                 dark,
             )));
-            clip.add(Shape::line(points, Stroke::new(1.3, color)));
+            clip.add(Shape::line(points, Stroke::new(1.2, color)));
         } else {
             clip.extend(Shape::dashed_line(
                 &points,
-                Stroke::new(1.0, color),
+                Stroke::new(1.0, color.gamma_multiply(0.8)),
                 3.0,
                 2.0,
             ));
         }
     }
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(1.0, color.gamma_multiply(0.7)),
-        StrokeKind::Inside,
-    );
 }
 
-/// Background color for heat-map cells (CPU/Memory/... columns) like Windows Task Manager.
+/// Background tint for heat-map cells (CPU/Memory/... columns) like Windows Task Manager:
+/// invisible when idle, a warm amber that strengthens with load.
 pub fn heat_color(intensity: f32, dark: bool) -> Option<Color32> {
-    if !intensity.is_finite() || intensity <= 0.003 {
+    // Small values stay untinted so the eye goes to what actually uses resources.
+    if !intensity.is_finite() || intensity < 0.04 {
         return None;
     }
     let t = intensity.clamp(0.0, 1.0).sqrt();
-    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
-    Some(if dark {
-        Color32::from_rgb(lerp(52, 140), lerp(46, 86), lerp(24, 14))
+    let alpha = if dark {
+        0.05 + 0.40 * t
     } else {
-        Color32::from_rgb(lerp(255, 255), lerp(246, 196), lerp(214, 92))
-    })
+        0.08 + 0.50 * t
+    };
+    Some(Color32::from_rgb(255, 184, 64).gamma_multiply(alpha))
 }
 
 pub fn paint_cell_bg(ui: &Ui, color: Option<Color32>) {
     if let Some(c) = color {
         let r = ui
             .max_rect()
-            .expand2(vec2(ui.spacing().item_spacing.x * 0.5, 1.0));
+            .expand2(vec2(ui.spacing().item_spacing.x * 0.5, 0.0));
         ui.painter().rect_filled(r, 0.0, c);
     }
 }
@@ -288,68 +287,6 @@ pub fn stacked_bar(
     }
 }
 
-/// Deterministic, pleasant color for a name (used for process avatars).
-pub fn name_color(name: &str) -> Color32 {
-    const PALETTE: [Color32; 10] = [
-        Color32::from_rgb(66, 133, 244),
-        Color32::from_rgb(219, 68, 55),
-        Color32::from_rgb(15, 157, 88),
-        Color32::from_rgb(171, 71, 188),
-        Color32::from_rgb(0, 150, 136),
-        Color32::from_rgb(239, 108, 0),
-        Color32::from_rgb(63, 81, 181),
-        Color32::from_rgb(194, 24, 91),
-        Color32::from_rgb(85, 139, 47),
-        Color32::from_rgb(121, 85, 72),
-    ];
-    let mut h: u32 = 2166136261;
-    for b in name.bytes() {
-        h = (h ^ b.to_ascii_lowercase() as u32).wrapping_mul(16777619);
-    }
-    PALETTE[(h % PALETTE.len() as u32) as usize]
-}
-
-/// Rounded square with the first letter of `name`, like an app icon placeholder.
-pub fn avatar(ui: &mut Ui, name: &str, size: f32, muted: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let mut color = name_color(name);
-    if muted {
-        color = color.gamma_multiply(0.55);
-    }
-    ui.painter().rect_filled(rect, size * 0.28, color);
-    let letter: String = name
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_else(|| "?".into());
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        letter,
-        FontId::proportional(size * 0.58),
-        Color32::WHITE,
-    );
-}
-
-/// Same as [`avatar`] but with an icon glyph instead of a letter.
-pub fn icon_tile(ui: &mut Ui, icon: &str, color: Color32, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let dark = ui.visuals().dark_mode;
-    ui.painter().rect_filled(
-        rect,
-        size * 0.28,
-        color.gamma_multiply(if dark { 0.22 } else { 0.16 }),
-    );
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        icon,
-        FontId::proportional(size * 0.62),
-        color,
-    );
-}
-
 /// Small rounded label with a tinted background.
 pub fn pill(ui: &mut Ui, text: impl Into<String>, color: Color32) -> egui::Response {
     let dark = ui.visuals().dark_mode;
@@ -391,27 +328,6 @@ pub fn temp_color(t: f32, ui: &Ui) -> Color32 {
 
 pub fn fmt_temp(t: f32) -> String {
     format!("{t:.0} °C")
-}
-
-/// Temperature badge with a thermometer icon, colored by severity.
-pub fn temp_badge(ui: &mut Ui, t: f32) -> egui::Response {
-    let color = if t >= 85.0 {
-        colors::DANGER
-    } else if t >= 70.0 {
-        colors::WARN
-    } else {
-        colors::GOOD
-    };
-    pill(
-        ui,
-        format!(
-            "{} {}",
-            egui_phosphor::regular::THERMOMETER_SIMPLE,
-            fmt_temp(t)
-        ),
-        color,
-    )
-    .on_hover_text("Temperature")
 }
 
 /// Thin horizontal usage bar (0..=1).

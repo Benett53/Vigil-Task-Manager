@@ -179,6 +179,28 @@ pub fn has_user_services() -> bool {
     cfg!(target_os = "linux") && service_manager_name() == "systemd"
 }
 
+/// Whether [`exe_icon`] can return anything on this platform.
+pub const HAS_EXE_ICONS: bool = cfg!(windows);
+
+/// Prepares a background thread for [`exe_icon`] calls.
+pub fn init_icon_thread() {
+    #[cfg(windows)]
+    windows::icons::init_thread();
+}
+
+/// The icon of an executable as (width, height, RGBA pixels).
+pub fn exe_icon(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        windows::icons::exe_icon(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Full display name of a user (GECOS / account full name).
 pub fn user_full_name(uid: u32, name: &str) -> Option<String> {
     #[cfg(target_os = "linux")]
@@ -190,5 +212,26 @@ pub fn user_full_name(uid: u32, name: &str) -> Option<String> {
     {
         let _ = (uid, name);
         None
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    /// `cargo test --release -- --ignored --nocapture sample_cost`
+    #[test]
+    #[ignore]
+    fn sample_cost() {
+        let mut c = super::Collector::new();
+        c.sample(true);
+        let mut total = std::time::Duration::ZERO;
+        let runs = 20;
+        for _ in 0..runs {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let t = std::time::Instant::now();
+            let s = c.sample(true);
+            total += t.elapsed();
+            assert!(!s.procs.is_empty());
+        }
+        println!("average sample with process scan: {:?}", total / runs);
     }
 }

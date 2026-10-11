@@ -144,6 +144,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         .id_salt("users_h")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            super::table::quiet_lines(ui);
             TableBuilder::new(ui)
                 .id_salt("users")
                 .resizable(true)
@@ -311,8 +312,8 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                             let p = &snap.procs[i];
                             row.col(|ui| {
                                 ui.add_space(40.0);
-                                super::widgets::avatar(ui, &p.name, 16.0, false);
-                                cell_label(ui, &*p.name);
+                                super::icons::app_icon(ui, view.icons, &p.exe, 16.0, false);
+                                cell_label(ui, super::processes::display_name(p));
                             });
                             row.col(|ui| {
                                 cell_label(ui, RichText::new(format!("PID {}", p.pid)).weak())

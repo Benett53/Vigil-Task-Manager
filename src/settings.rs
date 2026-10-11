@@ -215,8 +215,6 @@ pub struct Settings {
     pub details_columns: ProcessColumns,
     pub history_all_processes: bool,
     pub show_user_services: bool,
-    /// Resource tiles above the process list.
-    pub show_overview: bool,
     /// Detail pane for the selected process.
     pub show_process_details: bool,
     /// Process tree instead of a flat list on the Details page.
@@ -247,8 +245,7 @@ impl Default for Settings {
             details_columns: ProcessColumns::details_default(),
             history_all_processes: false,
             show_user_services: false,
-            show_overview: true,
-            show_process_details: true,
+            show_process_details: false,
             details_tree: false,
         }
     }

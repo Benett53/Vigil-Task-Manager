@@ -4,6 +4,7 @@
 pub mod app_history;
 pub mod details;
 pub mod dialogs;
+pub mod icons;
 pub mod performance;
 pub mod proc_menu;
 pub mod processes;
@@ -50,7 +51,6 @@ pub enum Action {
     StartupAddDialog,
     ResetAppHistory,
     RefreshNow,
-    ShowPerformance(performance::PerfSel),
     ExportCsv,
 }
 
@@ -61,6 +61,7 @@ pub struct View<'a> {
     pub app_history: &'a AppHistory,
     pub proc_history: &'a ProcessHistory,
     pub settings: &'a Settings,
+    pub icons: &'a icons::Icons,
     /// Lower-cased search text.
     pub search: &'a str,
 }

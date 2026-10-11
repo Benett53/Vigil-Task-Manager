@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-10-11
+
+### Added
+- Windows installer (`VigilSetup-<version>.exe`): per-user installation without administrator rights,
+  updates in place, removable through Windows Settings. The portable zip is still available.
+- Windows: application icons from the executables; processes are named by their file description.
+
+### Changed
+- Quieter interface: system UI font, calmer colors, fewer borders. Removed the resource tiles and filter
+  chips on the Processes page, the CPU/memory summary in the navigation and the permanent status bar.
+- Processes page: plain group headings, aligned column titles, heat map only for noticeable usage,
+  GPU columns hidden without GPU data, compact detail strip (off by default).
+- Performance page: borderless device list and figures, temperatures as values instead of extra graphs.
+
+### Performance
+- The Processes page no longer redraws at the display refresh rate; idle CPU usage dropped from about
+  10 % to below 1 % of one core.
+- Windows: one data sample takes about 10 ms instead of 39 ms (native process, disk and network queries,
+  per-process caching, no periodic WMI queries).
+
+### Fixed
+- Windows: disks showed 0 % active time; active time, response time and capacity are now reported per drive.
+- Windows: kernel CPU time, suspended processes, cache sizes and hardware-reserved memory were missing.
+- Windows: garbled names for executables with a malformed version resource.
+
 ## [0.2.0] - 2026-10-04
 
 ### Added

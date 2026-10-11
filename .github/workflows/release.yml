@@ -82,10 +82,27 @@ jobs:
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/release/vigil.exe, LICENSE, README.md $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "$env:VERSION".TrimStart("v")
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+                                "C:\Program Files\Inno Setup 6\ISCC.exe" `
+                                -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" | Select-Object -First 1
+          }
+          Copy-Item target/release/vigil.exe packaging/windows/vigil.exe
+          & $iscc.FullName "/DAppVersion=$version" "packaging/windows/vigil.iss"
+          if ($LASTEXITCODE -ne 0) { throw "the installer did not build" }
+          Copy-Item "packaging/windows/VigilSetup-$version.exe" .
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
-          path: "*.zip"
+          path: |
+            *.zip
+            VigilSetup-*.exe
 
   publish:
     name: Publish release
@@ -93,34 +110,43 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
       - name: Checksums
-        run: sha256sum *.tar.gz *.deb *.rpm *.zip > SHA256SUMS.txt
-      - name: Release tag
+        run: sha256sum *.tar.gz *.deb *.rpm *.zip VigilSetup-*.exe > SHA256SUMS.txt
+      - name: Release tag and notes
         run: |
           V="${VERSION#v}"
           echo "TAG=v$V" >> "$GITHUB_ENV"
+          # Release notes: only this version's section of the changelog, plus the download table.
+          awk -v h="## [$V]" 'index($0, h) == 1 {f = 1; next} f && /^## \[/ {exit} f' src/CHANGELOG.md > NOTES.md
+          test -s NOTES.md || { echo "CHANGELOG.md has no section for $V"; exit 1; }
+          cat >> NOTES.md <<'EOF'
+
+          ## Downloads
+
+          | System | File |
+          |---|---|
+          | Windows 10 / 11 | `VigilSetup-*.exe` (installer) or `vigil-*-windows-x86_64.zip` (portable) |
+          | Debian, Ubuntu | `vigil-task-manager_*_amd64.deb` (ARM: `_arm64.deb`) |
+          | Fedora, RHEL, openSUSE | `vigil-task-manager-*.x86_64.rpm` (ARM: `.aarch64.rpm`) |
+          | Other Linux | `vigil-*-linux-x86_64.tar.gz`, then `./install.sh` |
+
+          Linux binaries require glibc 2.28 or newer. Checksums: `SHA256SUMS.txt`.
+          EOF
       # Creates the tag (if needed) at the built commit and uploads all artifacts.
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           name: Vigil Task Manager ${{ env.TAG }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          body: |
-            ## Downloads
-
-            | System | File |
-            |---|---|
-            | Debian, Ubuntu, Mint, Pop!_OS, ... | `vigil-task-manager_*_amd64.deb` (ARM: `_arm64.deb`) → `sudo apt install ./vigil-task-manager_*.deb` |
-            | Fedora, RHEL, openSUSE, ... | `vigil-task-manager-*.x86_64.rpm` (ARM: `.aarch64.rpm`) → `sudo dnf install ./vigil-task-manager-*.rpm` |
-            | Any Linux distribution | `vigil-*-linux-x86_64.tar.gz` → extract, run `./vigil` directly or `./install.sh` |
-            | Windows 10 / 11 | `vigil-*-windows-x86_64.zip` → extract and run `vigil.exe` |
-
-            Linux binaries require glibc 2.28 or newer. Verify downloads with `SHA256SUMS.txt`.
+          body_path: NOTES.md
           files: |
+            VigilSetup-*.exe
             *.tar.gz
             *.deb
             *.rpm

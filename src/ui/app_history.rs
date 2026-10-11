@@ -76,6 +76,7 @@ pub fn show(
         return;
     }
     let mut sort_state = state.sort;
+    super::table::quiet_lines(ui);
     TableBuilder::new(ui)
         .id_salt("app_history")
         .striped(true)

@@ -5,7 +5,6 @@ use super::processes::{
     col_title, column_spec, is_numeric, status_badge, status_text, visible_columns,
 };
 use super::table::{Col, Sort, cell_label, cmp_f64, cmp_str, header, right_label};
-use super::widgets::avatar;
 use super::{Action, View};
 use crate::model::{Priority, ProcSignal, Process};
 use crate::util::{contains_ci, fmt_bytes, fmt_cpu_time, fmt_rate, fmt_unix_time};
@@ -150,6 +149,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         .id_salt("details_h")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            super::table::quiet_lines(ui);
             let mut tb = TableBuilder::new(ui)
                 .id_salt("details")
                 .striped(true)
@@ -207,7 +207,13 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                                 } else {
                                     ui.add_space(4.0);
                                 }
-                                avatar(ui, &p.name, 16.0, p.kernel_thread);
+                                super::icons::app_icon(
+                                    ui,
+                                    view.icons,
+                                    &p.exe,
+                                    16.0,
+                                    p.kernel_thread,
+                                );
                                 cell_label(ui, &*p.name);
                             }
                             Col::Pid => right_label(ui, p.pid.to_string()),

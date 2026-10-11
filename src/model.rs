@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProcState {
     Running,

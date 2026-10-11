@@ -362,10 +362,9 @@ pub fn file_description(exe: &str) -> Option<String> {
             return None;
         }
         let slice = std::slice::from_raw_parts(ptr as *const u16, len as usize);
-        let s = String::from_utf16_lossy(slice)
-            .trim_end_matches('\0')
-            .trim()
-            .to_owned();
+        // Some files report a length past the terminator; stop at the first NUL.
+        let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+        let s = String::from_utf16_lossy(&slice[..end]).trim().to_owned();
         if s.is_empty() { None } else { Some(s) }
     }
 }

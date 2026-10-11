@@ -166,6 +166,7 @@ pub fn show(
         .id_salt("services_h")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            super::table::quiet_lines(ui);
             let mut tb = TableBuilder::new(ui)
                 .id_salt("services")
                 .striped(true)

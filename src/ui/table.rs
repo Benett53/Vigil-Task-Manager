@@ -61,18 +61,24 @@ pub fn header(
     } else {
         ""
     };
+    // Bottom-up so every title sits on the same baseline, with the summary above it.
     let layout = if numeric {
-        Layout::top_down(Align::Max)
+        Layout::bottom_up(Align::Max)
     } else {
-        Layout::top_down(Align::Min)
+        Layout::bottom_up(Align::Min)
     };
     let resp = ui
         .with_layout(layout, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
+            let title = ui.label(RichText::new(format!("{title}{arrow}")).small().weak());
             if let Some(s) = summary {
-                ui.label(RichText::new(s).strong().size(15.0));
+                ui.label(
+                    RichText::new(s)
+                        .font(super::theme::semibold(15.0))
+                        .color(ui.visuals().strong_text_color()),
+                );
             }
-            ui.label(RichText::new(format!("{title}{arrow}")).small().weak())
+            title
         })
         .response;
     let resp = ui.interact(
@@ -112,4 +118,10 @@ pub fn cmp_str(a: &str, b: &str) -> Ordering {
     let ai = a.bytes().map(|c| c.to_ascii_lowercase());
     let bi = b.bytes().map(|c| c.to_ascii_lowercase());
     ai.cmp(bi)
+}
+
+/// Hides the column dividers egui_extras draws through the whole table body. They still
+/// appear while a divider is hovered or dragged.
+pub fn quiet_lines(ui: &mut Ui) {
+    ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
 }

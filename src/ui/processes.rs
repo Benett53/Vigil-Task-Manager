@@ -1,19 +1,16 @@
-//! "Processes" page: an overview strip, filters, apps grouped like Windows Task Manager
-//! with heat-map columns, and a detail pane for the selected entry.
+//! "Processes" page: apps grouped like Windows Task Manager with heat-map columns and an
+//! optional detail strip for the selected entry.
 
-use super::performance::PerfSel;
+use super::icons::app_icon;
 use super::proc_menu::{app_menu, process_menu};
-use super::table::{Col, Sort, cell_label, cmp_f64, cmp_str, header, right_label};
-use super::widgets::{
-    avatar, colors, dim_if_zero, fmt_temp, heat_color, meter, paint_cell_bg, pill, sparkline,
-};
+use super::table::{Col, Sort, cell_label, cmp_f64, cmp_str, header, quiet_lines, right_label};
+use super::theme;
+use super::widgets::{colors, dim_if_zero, heat_color, paint_cell_bg, pill, sparkline};
 use super::{Action, View};
 use crate::model::{Priority, ProcKind, ProcSignal, ProcState, Process};
 use crate::settings::ProcessColumns;
-use crate::util::{
-    contains_ci, fmt_bits, fmt_bytes, fmt_cpu_time, fmt_percent, fmt_rate, fmt_unix_time,
-};
-use egui::{Align, Color32, Layout, RichText, Sense, Ui, vec2};
+use crate::util::{contains_ci, fmt_bytes, fmt_cpu_time, fmt_percent, fmt_rate, fmt_unix_time};
+use egui::{Align, Layout, RichText, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder, TableRow};
 use egui_phosphor::regular as icon;
 use std::collections::{HashMap, HashSet};
@@ -25,21 +22,11 @@ pub enum Sel {
     Pid(u32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum KindFilter {
-    All,
-    Apps,
-    Background,
-    System,
-}
-
 pub struct State {
     pub sort: Sort,
     pub expanded: HashSet<Arc<str>>,
     pub collapsed_groups: HashSet<ProcKind>,
     expanded_gen: u64,
-    pub filter: KindFilter,
-    pub hide_idle: bool,
     pub selected: Option<Sel>,
     cache: Option<Cache>,
 }
@@ -51,8 +38,6 @@ impl Default for State {
             expanded: HashSet::new(),
             collapsed_groups: HashSet::new(),
             expanded_gen: 0,
-            filter: KindFilter::All,
-            hide_idle: false,
             selected: None,
             cache: None,
         }
@@ -67,16 +52,12 @@ struct CacheKey {
     group: bool,
     kernel: bool,
     expanded_gen: u64,
-    filter: KindFilter,
-    hide_idle: bool,
 }
 
 struct Cache {
     key: CacheKey,
     rows: Vec<Row>,
     apps: Vec<AppAgg>,
-    /// Number of visible entries per kind (for the filter chips).
-    counts: [usize; 3],
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +75,7 @@ enum Row {
 pub struct AppAgg {
     pub id: Arc<str>,
     pub name: Arc<str>,
+    pub exe: Arc<str>,
     pub members: Vec<usize>,
     pub cpu: f32,
     pub mem: u64,
@@ -117,15 +99,16 @@ fn proc_matches(p: &Process, search: &str) -> bool {
         || p.pid.to_string().starts_with(search)
 }
 
+/// Name shown on the Processes page: the file description where known (like Task Manager).
+pub fn display_name(p: &Process) -> &str {
+    p.app_name.as_deref().unwrap_or(&p.name)
+}
+
 pub fn disk_of(p: &Process) -> Option<f64> {
     match (p.disk_read, p.disk_write) {
         (None, None) => None,
         (r, w) => Some(r.unwrap_or(0.0) + w.unwrap_or(0.0)),
     }
-}
-
-fn is_idle(p: &Process) -> bool {
-    p.cpu < 0.05 && disk_of(p).unwrap_or(0.0) < 1.0 && p.gpu.unwrap_or(0.0) < 0.05
 }
 
 fn add_opt<T: std::ops::Add<Output = T> + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -137,7 +120,7 @@ fn add_opt<T: std::ops::Add<Output = T> + Copy>(a: Option<T>, b: Option<T>) -> O
 
 fn cmp_procs(a: &Process, b: &Process, sort: Sort) -> std::cmp::Ordering {
     let ord = match sort.col {
-        Col::Name => cmp_str(&a.name, &b.name),
+        Col::Name => cmp_str(display_name(a), display_name(b)),
         Col::Pid => a.pid.cmp(&b.pid),
         Col::Status => status_text(a).cmp(status_text(b)),
         Col::User => cmp_str(&a.user, &b.user),
@@ -232,8 +215,6 @@ impl State {
             group: view.settings.group_by_type,
             kernel: view.settings.show_kernel_threads,
             expanded_gen: self.expanded_gen,
-            filter: self.filter,
-            hide_idle: self.hide_idle,
         };
         if self.cache.as_ref().is_some_and(|c| c.key == key) {
             return;
@@ -256,6 +237,7 @@ impl State {
                     apps.push(AppAgg {
                         id: id.clone(),
                         name: name.clone(),
+                        exe: p.exe.clone(),
                         members: Vec::new(),
                         cpu: 0.0,
                         mem: 0,
@@ -281,7 +263,7 @@ impl State {
                 a.efficiency &= p.efficiency;
                 continue;
             }
-            if proc_matches(p, search) && !(self.hide_idle && is_idle(p)) {
+            if proc_matches(p, search) {
                 loose.push(i);
             }
         }
@@ -292,48 +274,19 @@ impl State {
         let visible_apps: Vec<usize> = (0..apps.len())
             .filter(|&ai| {
                 let a = &apps[ai];
-                let matches = search.is_empty()
+                search.is_empty()
                     || contains_ci(&a.name, search)
-                    || a.members.iter().any(|&m| proc_matches(&procs[m], search));
-                let active = !self.hide_idle || a.members.iter().any(|&m| !is_idle(&procs[m]));
-                matches && active
+                    || a.members.iter().any(|&m| proc_matches(&procs[m], search))
             })
             .collect();
 
-        let counts = [
-            visible_apps.len()
-                + loose
-                    .iter()
-                    .filter(|&&i| procs[i].kind == ProcKind::App)
-                    .count(),
-            loose
-                .iter()
-                .filter(|&&i| procs[i].kind == ProcKind::Background)
-                .count(),
-            loose
-                .iter()
-                .filter(|&&i| procs[i].kind == ProcKind::System)
-                .count(),
-        ];
-        let kind_visible = |k: ProcKind| match self.filter {
-            KindFilter::All => true,
-            KindFilter::Apps => k == ProcKind::App,
-            KindFilter::Background => k == ProcKind::Background,
-            KindFilter::System => k == ProcKind::System,
-        };
-
         let sort = self.sort;
-        let mut sorted_apps: Vec<usize> = if kind_visible(ProcKind::App) {
-            visible_apps
-        } else {
-            Vec::new()
-        };
+        let mut sorted_apps = visible_apps;
         sorted_apps.sort_by(|&a, &b| cmp_apps(&apps[a], &apps[b], sort));
         for a in &mut apps {
             a.members
                 .sort_by(|&x, &y| cmp_procs(&procs[x], &procs[y], sort));
         }
-        loose.retain(|&i| kind_visible(procs[i].kind));
         loose.sort_by(|&a, &b| cmp_procs(&procs[a], &procs[b], sort));
 
         let mut rows = Vec::with_capacity(loose.len() + sorted_apps.len() + 3);
@@ -440,12 +393,7 @@ impl State {
                 }
             }
         }
-        self.cache = Some(Cache {
-            key,
-            rows,
-            apps,
-            counts,
-        });
+        self.cache = Some(Cache { key, rows, apps });
     }
 
     fn selected_app(&self) -> Option<&AppAgg> {
@@ -548,6 +496,7 @@ impl State {
 
 struct Cells<'a> {
     name: &'a str,
+    exe: &'a Arc<str>,
     count: Option<usize>,
     depth: u8,
     last: bool,
@@ -593,14 +542,14 @@ pub fn visible_columns(cols: &ProcessColumns) -> Vec<Col> {
 
 pub fn column_spec(col: Col) -> Column {
     match col {
-        Col::Name => Column::initial(300.0).at_least(140.0).clip(true),
+        Col::Name => Column::initial(320.0).at_least(160.0).clip(true),
         Col::Pid => Column::initial(64.0).at_least(40.0),
-        Col::Status => Column::initial(118.0).at_least(50.0).clip(true),
+        Col::Status => Column::initial(108.0).at_least(50.0).clip(true),
         Col::User => Column::initial(100.0).at_least(50.0).clip(true),
         Col::Command => Column::remainder().at_least(120.0).clip(true),
         Col::Priority => Column::initial(90.0).at_least(50.0).clip(true),
         Col::Start => Column::initial(140.0).at_least(60.0).clip(true),
-        _ => Column::initial(88.0).at_least(50.0).clip(true),
+        _ => Column::initial(84.0).at_least(50.0).clip(true),
     }
 }
 
@@ -642,226 +591,32 @@ pub fn col_title(col: Col) -> &'static str {
     }
 }
 
-/// Compact resource tiles above the process list; clicking one opens its graph.
-fn overview(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
-    let snap = view.snap;
-    let mem_frac = snap.mem.used as f32 / snap.mem.total.max(1) as f32;
-    let disk = snap
-        .disks
-        .iter()
-        .max_by(|a, b| a.active.unwrap_or(0.0).total_cmp(&b.active.unwrap_or(0.0)));
-    let net = snap
-        .nets
-        .iter()
-        .filter(|n| n.connected)
-        .max_by(|a, b| (a.rx_bps + a.tx_bps).total_cmp(&(b.rx_bps + b.tx_bps)));
-    let gpu = snap.gpus.first();
-
-    struct Tile {
-        icon: &'static str,
-        title: &'static str,
-        value: String,
-        sub: String,
-        frac: f32,
-        color: Color32,
-        temp: Option<f32>,
-        target: PerfSel,
-    }
-    let mut tiles = vec![
-        Tile {
-            icon: icon::CPU,
-            title: "CPU",
-            value: fmt_percent(snap.cpu.total),
-            sub: snap
-                .cpu
-                .freq_mhz
-                .map(crate::util::fmt_freq_mhz)
-                .unwrap_or_else(|| format!("{} cores", snap.info.logical)),
-            frac: snap.cpu.total / 100.0,
-            color: colors::CPU,
-            temp: snap.cpu.temperature,
-            target: PerfSel::Cpu,
-        },
-        Tile {
-            icon: icon::MEMORY,
-            title: "Memory",
-            value: fmt_percent(mem_frac * 100.0),
-            sub: format!(
-                "{} / {}",
-                fmt_bytes(snap.mem.used),
-                fmt_bytes(snap.mem.total)
-            ),
-            frac: mem_frac,
-            color: colors::MEMORY,
-            temp: snap.mem.temperature,
-            target: PerfSel::Memory,
-        },
-    ];
-    if let Some(d) = disk {
-        tiles.push(Tile {
-            icon: icon::HARD_DRIVES,
-            title: "Disk",
-            value: fmt_percent(d.active.unwrap_or(0.0)),
-            sub: format!(
-                "{} read  ·  {} write",
-                fmt_rate(d.read_bps),
-                fmt_rate(d.write_bps)
-            ),
-            frac: d.active.unwrap_or(0.0) / 100.0,
-            color: colors::DISK,
-            temp: d.temperature,
-            target: PerfSel::Disk(d.id.clone()),
-        });
-    }
-    if let Some(n) = net {
-        let link = n
-            .link_mbps
-            .map(|m| m as f64 * 125_000.0)
-            .unwrap_or(125_000_000.0);
-        tiles.push(Tile {
-            icon: if n.kind == "Wi-Fi" {
-                icon::WIFI_HIGH
-            } else {
-                icon::NETWORK
-            },
-            title: "Network",
-            value: fmt_bits(n.rx_bps + n.tx_bps),
-            sub: format!(
-                "{} {}  {} {}",
-                icon::ARROW_DOWN,
-                fmt_bits(n.rx_bps),
-                icon::ARROW_UP,
-                fmt_bits(n.tx_bps)
-            ),
-            frac: ((n.rx_bps + n.tx_bps) / link) as f32,
-            color: colors::NETWORK,
-            temp: n.temperature,
-            target: PerfSel::Net(n.id.clone()),
-        });
-    }
-    if let Some(g) = gpu {
-        tiles.push(Tile {
-            icon: icon::GRAPHICS_CARD,
-            title: "GPU",
-            value: g.util.map(fmt_percent).unwrap_or_else(|| "—".into()),
-            sub: g.name.clone(),
-            frac: g.util.unwrap_or(0.0) / 100.0,
-            color: colors::GPU,
-            temp: g.temperature,
-            target: PerfSel::Gpu(g.id.clone()),
-        });
-    }
-
-    let gap = 8.0;
-    let n = tiles.len() as f32;
-    let width = ((ui.available_width() - gap * (n - 1.0)) / n).max(120.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for t in tiles {
-            let dark = ui.visuals().dark_mode;
-            let resp = ui
-                .scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
-                    egui::Frame::new()
-                        .fill(super::theme::card_fill(dark))
-                        .stroke(super::theme::card_stroke(dark))
-                        .corner_radius(10.0)
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.set_width(width - 22.0);
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                egui::Sides::new().shrink_left().truncate().show(
-                                    ui,
-                                    |ui| {
-                                        ui.label(RichText::new(t.icon).size(15.0).color(t.color));
-                                        ui.label(RichText::new(t.title).strong());
-                                    },
-                                    |ui| {
-                                        if let Some(temp) = t.temp {
-                                            ui.label(
-                                                RichText::new(fmt_temp(temp))
-                                                    .small()
-                                                    .color(super::widgets::temp_color(temp, ui)),
-                                            );
-                                        }
-                                        ui.label(RichText::new(&t.value).size(15.0).strong());
-                                    },
-                                );
-                                meter(ui, ui.available_width(), t.frac, t.color);
-                                ui.add(
-                                    egui::Label::new(RichText::new(&t.sub).small().weak())
-                                        .truncate(),
-                                );
-                            });
-                        });
-                })
-                .response;
-            if resp.clicked() {
-                actions.push(Action::ShowPerformance(t.target));
-            }
-            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(format!("Show {} details", t.title.to_lowercase()));
-        }
-    });
-}
-
-fn filter_bar(ui: &mut Ui, state: &mut State) {
-    let counts = state.cache.as_ref().map(|c| c.counts).unwrap_or([0; 3]);
-    ui.horizontal(|ui| {
-        let total = counts.iter().sum::<usize>();
-        for (f, label, n) in [
-            (KindFilter::All, "All", total),
-            (KindFilter::Apps, "Apps", counts[0]),
-            (KindFilter::Background, "Background", counts[1]),
-            (KindFilter::System, "System", counts[2]),
-        ] {
-            let selected = state.filter == f;
-            let text = RichText::new(format!("{label}  {n}"));
-            if ui
-                .add(
-                    egui::Button::new(if selected { text.strong() } else { text })
-                        .selected(selected),
-                )
-                .clicked()
-            {
-                state.filter = f;
-            }
-        }
-        ui.separator();
-        ui.checkbox(&mut state.hide_idle, "Hide idle processes")
-            .on_hover_text("Only show processes that currently use CPU, disk or GPU");
-    });
-}
-
 pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<Action>) {
     state.rebuild(view);
-    if view.settings.show_overview {
-        overview(ui, view, actions);
-        ui.add_space(6.0);
-    }
-    filter_bar(ui, state);
-    ui.add_space(2.0);
 
-    // Detail pane for the selected entry.
+    // Detail strip for the selected entry.
     if view.settings.show_process_details
         && let Some(sel) = state.selected.clone()
     {
         egui::Panel::bottom("process_detail")
-            .resizable(true)
-            .default_size(190.0)
-            .min_size(120.0)
+            .resizable(false)
+            .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 left: 0,
                 right: 0,
-                top: 8,
-                bottom: 0,
+                top: 12,
+                bottom: 4,
             }))
-            .show(ui, |ui| detail_pane(ui, state, &sel, view, actions));
+            .show(ui, |ui| detail_pane(ui, state, &sel, view));
     }
 
     let cache = state.cache.take().expect("built above");
-    let cols = visible_columns(&view.settings.processes_columns);
     let snap = view.snap;
+    let mut cols = visible_columns(&view.settings.processes_columns);
+    // GPU columns stay empty on machines without GPU accounting.
+    if snap.gpus.is_empty() && !snap.procs.iter().any(|p| p.gpu.is_some()) {
+        cols.retain(|c| !matches!(c, Col::Gpu | Col::GpuMemory));
+    }
     let ncpu = snap.info.logical.max(1) as f32;
     let cpu_scale = if view.settings.cpu_per_core_scale {
         ncpu
@@ -881,232 +636,214 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
         .iter()
         .filter_map(|g| g.util)
         .fold(0.0f32, f32::max);
-    let extra = usize::from(!cols.contains(&Col::Command));
+    // Without a command line column the name column takes the spare width, so the
+    // numbers line up at the right edge of the window.
+    let name_fills = !cols.contains(&Col::Command);
 
     let mut toggle_expand: Option<Arc<str>> = None;
     let mut toggle_group: Option<ProcKind> = None;
     let mut new_selection: Option<Sel> = None;
     let mut sort = state.sort;
 
-    egui::ScrollArea::horizontal()
-        .id_salt("processes_h")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut tb = TableBuilder::new(ui)
-                .id_salt("processes")
-                .striped(false)
-                .resizable(true)
-                .sense(Sense::click())
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .auto_shrink([false, false]);
+    ui.scope(|ui| {
+        quiet_lines(ui);
+        let mut tb = TableBuilder::new(ui)
+            .id_salt("processes_table")
+            .striped(false)
+            .resizable(true)
+            .sense(Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .auto_shrink([false, false]);
+        for c in &cols {
+            tb = tb.column(if name_fills && *c == Col::Name {
+                Column::remainder()
+                    .at_least(180.0)
+                    .clip(true)
+                    .resizable(false)
+            } else {
+                column_spec(*c)
+            });
+        }
+        tb.header(44.0, |mut h| {
             for c in &cols {
-                tb = tb.column(column_spec(*c));
+                h.col(|ui| {
+                    header_rule(ui, dark);
+                    let summary = match c {
+                        Col::Cpu => Some(fmt_percent(snap.cpu.total)),
+                        Col::Memory => Some(fmt_percent(snap.mem.used as f32 / mem_total * 100.0)),
+                        Col::Disk if !snap.disks.is_empty() => Some(fmt_percent(max_disk)),
+                        Col::Gpu if !snap.gpus.is_empty() => Some(fmt_percent(max_gpu)),
+                        _ => None,
+                    };
+                    header(
+                        ui,
+                        col_title(*c),
+                        summary.as_deref(),
+                        *c,
+                        &mut sort,
+                        is_numeric(*c),
+                    );
+                });
             }
-            if extra == 1 {
-                tb = tb.column(Column::remainder().at_least(0.0));
-            }
-            tb.header(40.0, |mut h| {
-                for c in &cols {
-                    h.col(|ui| {
-                        let summary = match c {
-                            Col::Cpu => Some(fmt_percent(snap.cpu.total)),
-                            Col::Memory => {
-                                Some(fmt_percent(snap.mem.used as f32 / mem_total * 100.0))
-                            }
-                            Col::Disk if !snap.disks.is_empty() => Some(fmt_percent(max_disk)),
-                            Col::Gpu if !snap.gpus.is_empty() => Some(fmt_percent(max_gpu)),
-                            _ => None,
-                        };
-                        header(
-                            ui,
-                            col_title(*c),
-                            summary.as_deref(),
-                            *c,
-                            &mut sort,
-                            is_numeric(*c),
-                        );
-                    });
+        })
+        .body(|body| {
+            let heights = cache.rows.iter().map(|r| {
+                if matches!(r, Row::Group(..)) {
+                    36.0
+                } else {
+                    30.0
                 }
-                if extra == 1 {
-                    h.col(|_| {});
-                }
-            })
-            .body(|body| {
-                let heights: Vec<f32> = cache
-                    .rows
-                    .iter()
-                    .map(|r| {
-                        if matches!(r, Row::Group(..)) {
-                            32.0
-                        } else {
-                            28.0
-                        }
-                    })
-                    .collect();
-                body.heterogeneous_rows(heights.into_iter(), |mut row| {
-                    let r = cache.rows[row.index()];
-                    match r {
-                        Row::Group(kind, n, cpu, mem) => {
-                            let collapsed = state.collapsed_groups.contains(&kind);
-                            for (i, c) in cols.iter().enumerate() {
-                                row.col(|ui| {
-                                    let fill = ui.visuals().faint_bg_color;
-                                    ui.painter().rect_filled(
-                                        ui.max_rect()
-                                            .expand2(vec2(ui.spacing().item_spacing.x * 0.5, 1.0)),
-                                        0.0,
-                                        fill,
+            });
+            body.heterogeneous_rows(heights, |mut row| {
+                let r = cache.rows[row.index()];
+                match r {
+                    Row::Group(kind, n, cpu, mem) => {
+                        let collapsed = state.collapsed_groups.contains(&kind);
+                        for (i, c) in cols.iter().enumerate() {
+                            row.col(|ui| {
+                                if i == 0 {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    let caret = if collapsed {
+                                        icon::CARET_RIGHT
+                                    } else {
+                                        icon::CARET_DOWN
+                                    };
+                                    ui.label(RichText::new(caret).size(11.0).weak());
+                                    ui.label(
+                                        RichText::new(kind.label())
+                                            .font(theme::semibold(12.5))
+                                            .color(ui.visuals().strong_text_color()),
                                     );
-                                    if i == 0 {
-                                        let caret = if collapsed {
-                                            icon::CARET_RIGHT
-                                        } else {
-                                            icon::CARET_DOWN
-                                        };
-                                        ui.label(RichText::new(caret).weak());
-                                        ui.label(
-                                            RichText::new(kind.label())
-                                                .strong()
-                                                .color(ui.visuals().strong_text_color()),
-                                        );
-                                        pill(ui, n.to_string(), colors::ACCENT);
-                                    } else if *c == Col::Cpu {
-                                        right_label(
-                                            ui,
-                                            RichText::new(format!("{:.1}%", cpu * cpu_scale))
-                                                .weak(),
-                                        );
-                                    } else if *c == Col::Memory {
-                                        right_label(ui, RichText::new(fmt_bytes(mem)).weak());
-                                    }
-                                });
-                            }
-                            if extra == 1 {
-                                row.col(|ui| {
-                                    let fill = ui.visuals().faint_bg_color;
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, fill);
-                                });
-                            }
-                            let resp = row.response();
-                            if resp.clicked() {
-                                toggle_group = Some(kind);
-                            }
-                            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text(if collapsed {
-                                    "Expand group"
-                                } else {
-                                    "Collapse group"
-                                });
-                        }
-                        Row::App(ai) => {
-                            let a = &cache.apps[ai];
-                            let sel = Sel::App(a.id.clone());
-                            row.set_selected(state.selected.as_ref() == Some(&sel));
-                            let expanded = state.expanded.contains(&a.id);
-                            let status = if a.all_stopped {
-                                "Suspended"
-                            } else if a.efficiency {
-                                "Efficiency mode"
-                            } else {
-                                ""
-                            };
-                            let cells = Cells {
-                                name: &a.name,
-                                count: Some(a.members.len()),
-                                depth: 0,
-                                last: false,
-                                expander: Some(expanded),
-                                pid: None,
-                                status,
-                                user: &a.user,
-                                cpu: a.cpu * cpu_scale,
-                                mem: a.mem,
-                                disk: a.disk,
-                                gpu: a.gpu,
-                                gpu_mem: a.gpu_mem,
-                                threads: a.threads,
-                                nice: None,
-                                rss: None,
-                                virt: None,
-                                started: None,
-                                command: "",
-                                muted: false,
-                            };
-                            let clicked_expander = draw_cells(
-                                &mut row, &cols, &cells, dark, heat, mem_total, cpu_scale, extra,
-                            );
-                            let resp = row.response();
-                            if clicked_expander || resp.double_clicked() {
-                                toggle_expand = Some(a.id.clone());
-                            }
-                            if resp.clicked() || resp.secondary_clicked() {
-                                new_selection = Some(sel);
-                            }
-                            let members: Vec<&Process> = a
-                                .members
-                                .iter()
-                                .filter_map(|&i| snap.procs.get(i))
-                                .collect();
-                            let mut exp = expanded;
-                            resp.context_menu(|ui| {
-                                app_menu(ui, &a.name, &members, &mut exp, actions);
-                            });
-                            if exp != expanded {
-                                toggle_expand = Some(a.id.clone());
-                            }
-                        }
-                        Row::Proc { idx, depth, last } => {
-                            let Some(p) = snap.procs.get(idx) else {
-                                for _ in 0..cols.len() + extra {
-                                    row.col(|_| {});
+                                    ui.label(RichText::new(n.to_string()).small().weak());
+                                } else if *c == Col::Cpu {
+                                    right_label(
+                                        ui,
+                                        RichText::new(format!("{:.1}%", cpu * cpu_scale))
+                                            .small()
+                                            .weak(),
+                                    );
+                                } else if *c == Col::Memory {
+                                    right_label(ui, RichText::new(fmt_bytes(mem)).small().weak());
                                 }
-                                return;
-                            };
-                            let sel = Sel::Pid(p.pid);
-                            row.set_selected(state.selected.as_ref() == Some(&sel));
-                            let cells = Cells {
-                                name: &p.name,
-                                count: None,
-                                depth,
-                                last,
-                                expander: None,
-                                pid: Some(p.pid),
-                                status: status_text(p),
-                                user: &p.user,
-                                cpu: p.cpu * cpu_scale,
-                                mem: p.mem,
-                                disk: disk_of(p),
-                                gpu: p.gpu,
-                                gpu_mem: p.gpu_mem,
-                                threads: p.threads,
-                                nice: Some(p.nice),
-                                rss: Some(p.rss),
-                                virt: Some(p.virt),
-                                started: Some(p.start_time),
-                                command: &p.cmdline,
-                                muted: p.kind == ProcKind::System,
-                            };
-                            draw_cells(
-                                &mut row, &cols, &cells, dark, heat, mem_total, cpu_scale, extra,
-                            );
-                            let resp = row.response();
-                            if resp.clicked() || resp.secondary_clicked() {
-                                new_selection = Some(sel);
-                            }
-                            if resp.double_clicked() {
-                                actions.push(Action::OpenProperties(p.pid, p.name.to_string()));
-                            }
-                            let resp = if p.cmdline.is_empty() {
-                                resp
-                            } else {
-                                resp.on_hover_text(&*p.cmdline)
-                            };
-                            resp.context_menu(|ui| process_menu(ui, p, snap, actions, true));
+                            });
+                        }
+                        let resp = row.response();
+                        if resp.clicked() {
+                            toggle_group = Some(kind);
+                        }
+                        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    }
+                    Row::App(ai) => {
+                        let a = &cache.apps[ai];
+                        let sel = Sel::App(a.id.clone());
+                        row.set_selected(state.selected.as_ref() == Some(&sel));
+                        let expanded = state.expanded.contains(&a.id);
+                        let status = if a.all_stopped {
+                            "Suspended"
+                        } else if a.efficiency {
+                            "Efficiency mode"
+                        } else {
+                            ""
+                        };
+                        let cells = Cells {
+                            name: &a.name,
+                            exe: &a.exe,
+                            count: Some(a.members.len()),
+                            depth: 0,
+                            last: false,
+                            expander: Some(expanded),
+                            pid: None,
+                            status,
+                            user: &a.user,
+                            cpu: a.cpu * cpu_scale,
+                            mem: a.mem,
+                            disk: a.disk,
+                            gpu: a.gpu,
+                            gpu_mem: a.gpu_mem,
+                            threads: a.threads,
+                            nice: None,
+                            rss: None,
+                            virt: None,
+                            started: None,
+                            command: "",
+                            muted: false,
+                        };
+                        let clicked_expander = draw_cells(
+                            &mut row, &cols, &cells, view, dark, heat, mem_total, cpu_scale,
+                        );
+                        let resp = row.response();
+                        if clicked_expander || resp.double_clicked() {
+                            toggle_expand = Some(a.id.clone());
+                        }
+                        if resp.clicked() || resp.secondary_clicked() {
+                            new_selection = Some(sel);
+                        }
+                        let members: Vec<&Process> = a
+                            .members
+                            .iter()
+                            .filter_map(|&i| snap.procs.get(i))
+                            .collect();
+                        let mut exp = expanded;
+                        resp.context_menu(|ui| {
+                            app_menu(ui, &a.name, &members, &mut exp, actions);
+                        });
+                        if exp != expanded {
+                            toggle_expand = Some(a.id.clone());
                         }
                     }
-                });
+                    Row::Proc { idx, depth, last } => {
+                        let Some(p) = snap.procs.get(idx) else {
+                            for _ in 0..cols.len() {
+                                row.col(|_| {});
+                            }
+                            return;
+                        };
+                        let sel = Sel::Pid(p.pid);
+                        row.set_selected(state.selected.as_ref() == Some(&sel));
+                        let cells = Cells {
+                            name: display_name(p),
+                            exe: &p.exe,
+                            count: None,
+                            depth,
+                            last,
+                            expander: None,
+                            pid: Some(p.pid),
+                            status: status_text(p),
+                            user: &p.user,
+                            cpu: p.cpu * cpu_scale,
+                            mem: p.mem,
+                            disk: disk_of(p),
+                            gpu: p.gpu,
+                            gpu_mem: p.gpu_mem,
+                            threads: p.threads,
+                            nice: Some(p.nice),
+                            rss: Some(p.rss),
+                            virt: Some(p.virt),
+                            started: Some(p.start_time),
+                            command: &p.cmdline,
+                            muted: p.kind == ProcKind::System,
+                        };
+                        draw_cells(
+                            &mut row, &cols, &cells, view, dark, heat, mem_total, cpu_scale,
+                        );
+                        let resp = row.response();
+                        if resp.clicked() || resp.secondary_clicked() {
+                            new_selection = Some(sel);
+                        }
+                        if resp.double_clicked() {
+                            actions.push(Action::OpenProperties(p.pid, p.name.to_string()));
+                        }
+                        let resp = if p.cmdline.is_empty() {
+                            resp
+                        } else {
+                            resp.on_hover_text(&*p.cmdline)
+                        };
+                        resp.context_menu(|ui| process_menu(ui, p, snap, actions, true));
+                    }
+                }
             });
         });
+    });
     state.cache = Some(cache);
     if sort != state.sort {
         state.sort = sort;
@@ -1128,67 +865,78 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
     }
 }
 
+/// Hairline under a header cell, spanning the gap to the next cell.
+pub fn header_rule(ui: &Ui, dark: bool) {
+    let r = ui.max_rect();
+    let half_gap = ui.spacing().item_spacing.x * 0.5;
+    ui.painter().hline(
+        (r.left() - half_gap)..=(r.right() + half_gap),
+        r.bottom() + 2.5,
+        egui::Stroke::new(1.0, theme::hairline(dark)),
+    );
+}
+
 /// Draws all cells of a row; returns true if the expand arrow was clicked.
 #[allow(clippy::too_many_arguments)]
 fn draw_cells(
     row: &mut TableRow<'_, '_>,
     cols: &[Col],
     c: &Cells<'_>,
+    view: &View<'_>,
     dark: bool,
     heat: bool,
     mem_total: f32,
     cpu_scale: f32,
-    extra: usize,
 ) -> bool {
     let mut expander_clicked = false;
     for col in cols {
         row.col(|ui| match col {
             Col::Name => {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = 8.0;
                 if c.depth > 0 {
                     // Tree guide for child processes of an app.
                     let (rect, _) =
-                        ui.allocate_exact_size(vec2(34.0, ui.available_height()), Sense::hover());
-                    let x = rect.left() + 14.0;
-                    let stroke =
-                        egui::Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.6));
+                        ui.allocate_exact_size(vec2(26.0, ui.available_height()), Sense::hover());
+                    let x = rect.left() + 9.5;
+                    let stroke = egui::Stroke::new(1.0, theme::hairline(dark).gamma_multiply(1.6));
                     let bottom = if c.last {
                         rect.center().y
                     } else {
-                        rect.bottom() + 2.0
+                        rect.bottom() + 3.0
                     };
-                    ui.painter().vline(x, rect.top() - 2.0..=bottom, stroke);
+                    ui.painter().vline(x, rect.top() - 3.0..=bottom, stroke);
                     ui.painter()
-                        .hline(x..=rect.right() - 4.0, rect.center().y, stroke);
+                        .hline(x..=rect.right() - 2.0, rect.center().y, stroke);
                 } else if let Some(expanded) = c.expander {
                     let caret = if expanded {
                         icon::CARET_DOWN
                     } else {
                         icon::CARET_RIGHT
                     };
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(caret).weak())
-                                .frame(false)
-                                .small(),
-                        )
-                        .on_hover_text(if expanded { "Collapse" } else { "Expand" })
-                        .clicked()
-                    {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                    let color = if resp.hovered() {
+                        ui.visuals().strong_text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        caret,
+                        egui::FontId::proportional(11.0),
+                        color,
+                    );
+                    if resp.clicked() {
                         expander_clicked = true;
                     }
                 } else {
-                    ui.add_space(20.0);
+                    ui.add_space(18.0);
                 }
-                if c.depth == 0 {
-                    avatar(ui, c.name, 18.0, c.muted);
-                }
-                let text = if c.expander.is_some() {
-                    RichText::new(c.name).strong()
-                } else if c.muted {
-                    RichText::new(c.name).color(ui.visuals().text_color().gamma_multiply(0.85))
+                app_icon(ui, view.icons, c.exe, 16.0, c.muted);
+                let text = if c.muted {
+                    RichText::new(c.name).color(ui.visuals().text_color().gamma_multiply(0.8))
                 } else {
-                    RichText::new(c.name)
+                    RichText::new(c.name).color(ui.visuals().strong_text_color())
                 };
                 cell_label(ui, text);
                 if let Some(n) = c.count.filter(|n| *n > 1) {
@@ -1209,7 +957,7 @@ fn draw_cells(
             }
             Col::Memory => {
                 if heat {
-                    paint_cell_bg(ui, heat_color(c.mem as f32 / mem_total * 8.0, dark));
+                    paint_cell_bg(ui, heat_color(c.mem as f32 / mem_total * 5.0, dark));
                 }
                 right_label(ui, dim_if_zero(ui, fmt_bytes(c.mem), c.mem == 0));
             }
@@ -1251,22 +999,13 @@ fn draw_cells(
             _ => {}
         });
     }
-    if extra == 1 {
-        row.col(|_| {});
-    }
     expander_clicked
 }
 
-/// Information and quick actions for the selected process or app.
-fn detail_pane(
-    ui: &mut Ui,
-    state: &mut State,
-    sel: &Sel,
-    view: &View<'_>,
-    actions: &mut Vec<Action>,
-) {
+/// Compact strip with live graphs for the selected process or app.
+fn detail_pane(ui: &mut Ui, state: &mut State, sel: &Sel, view: &View<'_>) {
     let snap = view.snap;
-    // Resolve the selection to a representative process and aggregated numbers.
+    let dark = ui.visuals().dark_mode;
     let (title, members): (String, Vec<&Process>) = match sel {
         Sel::Pid(pid) => match snap.procs.iter().find(|p| p.pid == *pid) {
             Some(p) => (p.name.to_string(), vec![p]),
@@ -1286,11 +1025,15 @@ fn detail_pane(
             (name, m)
         }
     };
+    let top = ui.max_rect().top() - 6.0;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        top,
+        egui::Stroke::new(1.0, theme::hairline(dark)),
+    );
     let Some(main) = members.iter().min_by_key(|p| p.pid).copied() else {
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} The selected process has exited.", icon::INFO)).weak(),
-            );
+            ui.label(RichText::new("The selected process has exited.").weak());
             if ui.small_button("Clear selection").clicked() {
                 state.selected = None;
             }
@@ -1301,178 +1044,87 @@ fn detail_pane(
     let mem: u64 = members.iter().map(|p| p.mem).sum();
     let threads: u32 = members.iter().map(|p| p.threads).sum();
     let disk: f64 = members.iter().filter_map(|p| disk_of(p)).sum();
-    let gpu: Option<f32> = members.iter().filter_map(|p| p.gpu).reduce(|a, b| a + b);
-    let pids: Vec<u32> = members.iter().map(|p| p.pid).collect();
-    let efficiency = members.iter().all(|p| p.efficiency);
-    let suspended = members.iter().all(|p| p.state == ProcState::Stopped);
     let hist = view.proc_history;
     let cap = view.settings.graph_points;
 
-    super::widgets::card(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            avatar(ui, &title, 36.0, false);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&title).size(17.0).strong());
-                    if members.len() > 1 {
-                        pill(ui, format!("{} processes", members.len()), colors::ACCENT);
-                    } else {
-                        pill(ui, format!("PID {}", main.pid), colors::ACCENT);
-                    }
-                    pill(ui, format!("{} {}", icon::USER, main.user), colors::CPU);
-                    let st = status_text(main);
-                    if !st.is_empty() {
-                        status_badge(ui, st);
-                    }
-                });
-                let path = if main.exe.is_empty() {
-                    &main.cmdline
-                } else {
-                    &main.exe
-                };
-                ui.add(egui::Label::new(RichText::new(&**path).small().weak()).truncate());
-            });
-        });
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(egui::Button::new(
-                    RichText::new(format!("{} End task", icon::X_CIRCLE)).color(colors::DANGER),
-                ))
-                .clicked()
-            {
-                actions.push(Action::Signal {
-                    pids: pids.clone(),
-                    sig: ProcSignal::Terminate,
-                    target: if pids.len() > 1 {
-                        format!("{title} ({} processes)", pids.len())
-                    } else {
-                        format!("{title} (PID {})", main.pid)
-                    },
-                });
-            }
-            if ui
-                .add(egui::Button::new(format!("{} Efficiency", icon::LEAF)).selected(efficiency))
-                .on_hover_text("Lower the priority to save energy and keep other apps responsive")
-                .clicked()
-            {
-                actions.push(Action::SetEfficiency(pids.clone(), !efficiency));
-            }
-            let (label, sig) = if suspended {
-                (format!("{} Resume", icon::PLAY), ProcSignal::Resume)
-            } else {
-                (format!("{} Suspend", icon::PAUSE), ProcSignal::Suspend)
-            };
-            if ui.button(label).clicked() {
-                actions.push(Action::Signal {
-                    pids: pids.clone(),
-                    sig,
-                    target: title.clone(),
-                });
-            }
-            if ui
-                .add_enabled(
-                    !main.exe.is_empty(),
-                    egui::Button::new(format!("{} Open location", icon::FOLDER_OPEN)),
-                )
-                .clicked()
-            {
-                actions.push(Action::OpenLocation(main.exe.to_string()));
-            }
-            if ui.button(format!("{} Properties", icon::INFO)).clicked() {
-                actions.push(Action::OpenProperties(main.pid, main.name.to_string()));
-            }
-            if ui
-                .button(format!("{} Search online", icon::GLOBE))
-                .clicked()
-            {
-                actions.push(Action::SearchOnline(title.clone()));
-            }
-        });
-        ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
-            let spark_w = ((ui.available_width() - 420.0) / 3.0).clamp(90.0, 220.0);
-            for (label, value, series, max, color) in [
-                (
-                    "CPU",
-                    format!("{:.1}%", cpu),
-                    &hist.cpu,
-                    100.0f32,
-                    colors::CPU,
-                ),
-                (
-                    "Memory",
-                    fmt_bytes(mem),
-                    &hist.mem,
-                    hist.mem.max().max(1.0) * 1.2,
-                    colors::MEMORY,
-                ),
-                (
-                    "Disk",
-                    fmt_rate(disk),
-                    &hist.disk,
-                    hist.disk.max().max(1024.0) * 1.2,
-                    colors::DISK,
-                ),
-            ] {
+    let spark_w = 132.0;
+    let graphs_w = 3.0 * (spark_w + 16.0);
+    let height = 52.0;
+    ui.horizontal(|ui| {
+        let left_w = (ui.available_width() - graphs_w).max(160.0);
+        ui.allocate_ui_with_layout(
+            vec2(left_w, height),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                app_icon(ui, view.icons, &main.exe, 28.0, false);
+                ui.add_space(4.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(label).small().weak());
-                        ui.label(RichText::new(value).strong());
+                        ui.label(
+                            RichText::new(&title)
+                                .font(theme::semibold(14.5))
+                                .color(ui.visuals().strong_text_color()),
+                        );
+                        status_badge(ui, status_text(main));
                     });
-                    sparkline(ui, vec2(spark_w, 46.0), series, None, max, cap, color);
-                });
-            }
-            ui.add_space(10.0);
-            egui::Grid::new("proc_detail_grid")
-                .num_columns(4)
-                .spacing([14.0, 3.0])
-                .show(ui, |ui| {
-                    let kv = |ui: &mut Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).weak());
-                        ui.label(v);
+                    let who = if members.len() > 1 {
+                        format!("{} processes", members.len())
+                    } else {
+                        format!("PID {}", main.pid)
                     };
-                    kv(ui, "Started", fmt_unix_time(main.start_time));
-                    kv(
-                        ui,
-                        "CPU time",
+                    let facts = format!(
+                        "{who}  ·  {}  ·  {threads} threads  ·  CPU time {}  ·  started {}",
+                        main.user,
                         fmt_cpu_time(members.iter().map(|p| p.cpu_time).sum()),
+                        fmt_unix_time(main.start_time)
                     );
-                    ui.end_row();
-                    kv(ui, "Threads", threads.to_string());
-                    kv(
-                        ui,
-                        "Priority",
-                        Priority::from_nice(main.nice).short_label().to_owned(),
-                    );
-                    ui.end_row();
-                    kv(
-                        ui,
-                        "Working set",
-                        fmt_bytes(members.iter().map(|p| p.rss).sum()),
-                    );
-                    kv(
-                        ui,
-                        "GPU",
-                        gpu.map(|g| format!("{:.1}%", g.min(100.0)))
-                            .unwrap_or_else(|| "—".into()),
-                    );
-                    ui.end_row();
-                    kv(ui, "Parent PID", main.ppid.to_string());
-                    kv(
-                        ui,
-                        "Service",
-                        main.unit
-                            .as_deref()
-                            .unwrap_or("—")
-                            .trim_end_matches(".service")
-                            .to_owned(),
-                    );
-                    ui.end_row();
+                    ui.add(egui::Label::new(RichText::new(facts).small().weak()).truncate());
+                    let path = if main.exe.is_empty() {
+                        &main.cmdline
+                    } else {
+                        &main.exe
+                    };
+                    ui.add(egui::Label::new(RichText::new(&**path).small().weak()).truncate());
                 });
-        });
+            },
+        );
+        for (label, value, series, max, color) in [
+            (
+                "CPU",
+                format!("{cpu:.1}%"),
+                &hist.cpu,
+                100.0f32,
+                colors::CPU,
+            ),
+            (
+                "Memory",
+                fmt_bytes(mem),
+                &hist.mem,
+                hist.mem.max().max(1.0) * 1.2,
+                colors::MEMORY,
+            ),
+            (
+                "Disk",
+                fmt_rate(disk),
+                &hist.disk,
+                hist.disk.max().max(1024.0) * 1.2,
+                colors::DISK,
+            ),
+        ] {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).small().weak());
+                    ui.label(
+                        RichText::new(value)
+                            .small()
+                            .color(ui.visuals().strong_text_color()),
+                    );
+                });
+                sparkline(ui, vec2(spark_w, 30.0), series, None, max, cap, color);
+            });
+        }
     });
 }

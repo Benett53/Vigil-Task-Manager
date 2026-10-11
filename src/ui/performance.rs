@@ -3,8 +3,7 @@
 
 use super::View;
 use super::widgets::{
-    Line, card, colors, fmt_temp, graph, icon_tile, meter, sparkline, stacked_bar, temp_badge,
-    temp_color,
+    Line, card, colors, fmt_temp, graph, meter, sparkline, stacked_bar, temp_color,
 };
 use crate::history::{DeviceHistory, Series};
 use crate::model::{BatterySample, DiskSample, GpuSample, NetSample, SensorKind};
@@ -66,6 +65,15 @@ fn disk_title(i: usize, d: &DiskSample) -> String {
         format!("Disk {i}")
     } else {
         format!("Disk {i} ({})", mounts.join(", "))
+    }
+}
+
+/// "Wi-Fi", or "Ethernet (Office LAN)" when the adapter has its own name.
+fn net_title(n: &NetSample) -> String {
+    if n.id == n.kind || n.id.is_empty() {
+        n.kind.clone()
+    } else {
+        format!("{} ({})", n.kind, n.id)
     }
 }
 
@@ -145,7 +153,6 @@ pub fn show(
                             title: "CPU".into(),
                             value: fmt_percent(snap.cpu.total),
                             subtitle: freq,
-                            temp: snap.cpu.temperature,
                             color: colors::CPU,
                         },
                         &h.cpu,
@@ -168,7 +175,6 @@ pub fn show(
                                 fmt_bytes(snap.mem.used),
                                 fmt_bytes(snap.mem.total)
                             ),
-                            temp: snap.mem.temperature,
                             color: colors::MEMORY,
                         },
                         &h.mem,
@@ -187,7 +193,6 @@ pub fn show(
                                     title: disk_title(i, d),
                                     value: fmt_percent(d.active.unwrap_or(0.0)),
                                     subtitle: d.kind.clone(),
-                                    temp: d.temperature,
                                     color: colors::DISK,
                                 },
                                 &dh.a,
@@ -217,10 +222,9 @@ pub fn show(
                                 CardSpec {
                                     sel: PerfSel::Net(n.id.clone()),
                                     icon: net_icon(n),
-                                    title: format!("{} ({})", n.kind, n.id),
+                                    title: net_title(n),
                                     value: String::new(),
                                     subtitle: sub,
-                                    temp: n.temperature,
                                     color: colors::NETWORK,
                                 },
                                 &nh.a,
@@ -241,7 +245,6 @@ pub fn show(
                                     title: format!("GPU {i}"),
                                     value: g.util.map(fmt_percent).unwrap_or_default(),
                                     subtitle: g.name.clone(),
-                                    temp: g.temperature,
                                     color: colors::GPU,
                                 },
                                 &gh.a,
@@ -262,7 +265,6 @@ pub fn show(
                                     title: "Battery".into(),
                                     value: format!("{:.0}%", b.percent),
                                     subtitle: b.status.clone(),
-                                    temp: b.temperature,
                                     color: colors::BATTERY,
                                 },
                                 &bh.a,
@@ -296,9 +298,8 @@ pub fn show(
                                 sel: PerfSel::Sensors,
                                 icon: icon::THERMOMETER,
                                 title: "Sensors".into(),
-                                value: String::new(),
+                                value: hottest.map(fmt_temp).unwrap_or_default(),
                                 subtitle: sub,
-                                temp: hottest,
                                 color: colors::SENSORS,
                             },
                             &h.cpu_temp,
@@ -370,10 +371,10 @@ struct CardSpec {
     title: String,
     value: String,
     subtitle: String,
-    temp: Option<f32>,
     color: Color32,
 }
 
+/// One device in the list on the left: title, value, subtitle and a sparkline.
 fn card_entry(
     ui: &mut Ui,
     state: &mut State,
@@ -384,58 +385,55 @@ fn card_entry(
     cap: usize,
 ) {
     let selected = state.selected == spec.sel;
-    let dark = ui.visuals().dark_mode;
     let resp = ui
         .scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
+            let hovered = ui.response().hovered();
+            let visuals = ui.visuals();
             let fill = if selected {
-                spec.color.gamma_multiply(if dark { 0.16 } else { 0.10 })
+                visuals.widgets.active.weak_bg_fill
+            } else if hovered {
+                visuals.widgets.hovered.weak_bg_fill
             } else {
-                super::theme::card_fill(dark)
-            };
-            let stroke = if selected {
-                egui::Stroke::new(1.0, spec.color.gamma_multiply(0.8))
-            } else {
-                super::theme::card_stroke(dark)
+                Color32::TRANSPARENT
             };
             egui::Frame::new()
                 .fill(fill)
-                .stroke(stroke)
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::symmetric(10, 8))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin {
+                    left: 10,
+                    right: 10,
+                    top: 8,
+                    bottom: 6,
+                })
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        icon_tile(ui, spec.icon, spec.color, 26.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            egui::Sides::new().shrink_left().truncate().show(
-                                ui,
-                                |ui| ui.label(RichText::new(&spec.title).strong()),
-                                |ui| {
-                                    if !spec.value.is_empty() {
-                                        ui.label(RichText::new(&spec.value).strong());
-                                    }
-                                },
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(spec.icon).color(spec.color));
+                            ui.label(
+                                RichText::new(&spec.title)
+                                    .font(super::theme::semibold(13.0))
+                                    .color(ui.visuals().strong_text_color()),
                             );
-                            egui::Sides::new().shrink_left().truncate().show(
-                                ui,
-                                |ui| ui.label(RichText::new(&spec.subtitle).small().weak()),
-                                |ui| {
-                                    if let Some(t) = spec.temp {
-                                        ui.label(
-                                            RichText::new(fmt_temp(t))
-                                                .small()
-                                                .color(temp_color(t, ui)),
-                                        );
-                                    }
-                                },
-                            );
-                        });
-                    });
-                    ui.add_space(2.0);
+                        },
+                        |ui| {
+                            if !spec.value.is_empty() {
+                                ui.label(
+                                    RichText::new(&spec.value)
+                                        .color(ui.visuals().strong_text_color()),
+                                );
+                            }
+                        },
+                    );
+                    ui.add(
+                        egui::Label::new(RichText::new(&spec.subtitle).small().weak()).truncate(),
+                    );
+                    ui.add_space(4.0);
                     sparkline(
                         ui,
-                        vec2(ui.available_width(), 30.0),
+                        vec2(ui.available_width(), 26.0),
                         series,
                         series2,
                         max,
@@ -451,34 +449,24 @@ fn card_entry(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand);
 }
 
-fn title_row(
-    ui: &mut Ui,
-    icon_str: &str,
-    color: Color32,
-    title: &str,
-    subtitle: &str,
-    temp: Option<f32>,
-) {
-    egui::Sides::new().shrink_left().show(
-        ui,
-        |ui| {
-            icon_tile(ui, icon_str, color, 38.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new(title).size(22.0).strong());
-                ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
-            });
-        },
-        |ui| {
-            if let Some(t) = temp {
-                temp_badge(ui, t);
-            }
-        },
-    );
-    ui.add_space(8.0);
+fn title_row(ui: &mut Ui, icon_str: &str, color: Color32, title: &str, subtitle: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon_str).size(22.0).color(color));
+        ui.add_space(2.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(
+                RichText::new(title)
+                    .font(super::theme::semibold(20.0))
+                    .color(ui.visuals().strong_text_color()),
+            );
+            ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
+        });
+    });
+    ui.add_space(12.0);
 }
 
-/// A graph inside a card, with caption, scale label and hover values.
+/// A graph with caption, scale label and hover values.
 #[allow(clippy::too_many_arguments)]
 fn graph_card(
     ui: &mut Ui,
@@ -491,53 +479,28 @@ fn graph_card(
     height: f32,
     fmt: &dyn Fn(f32) -> String,
 ) {
-    card(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui::Sides::new().show(
-            ui,
-            |ui| ui.label(RichText::new(caption).small().weak()),
-            |ui| ui.label(RichText::new(scale).small().weak()),
-        );
-        graph(
-            ui,
-            vec2(ui.available_width(), height),
-            lines,
-            max,
-            view.settings.graph_points,
-            color,
-            Some(fmt),
-            seconds_per_point(view),
-        );
-        egui::Sides::new().show(
-            ui,
-            |ui| ui.label(RichText::new(seconds_label(view)).small().weak()),
-            |ui| ui.label(RichText::new("0").small().weak()),
-        );
-    });
-    ui.add_space(8.0);
-}
-
-fn temp_graph(ui: &mut Ui, view: &View<'_>, series: &Series, color: Color32, height: f32) {
-    if series.len() < 2 {
-        return;
-    }
-    let max = nice_max(series.max().max(60.0) * 1.1, 60.0).min(150.0);
-    graph_card(
+    ui.spacing_mut().item_spacing.y = 4.0;
+    egui::Sides::new().show(
         ui,
-        view,
-        &format!("{} Temperature", icon::THERMOMETER_SIMPLE),
-        &fmt_temp(max),
-        &[Line {
-            series,
-            color,
-            fill: true,
-            dashed: false,
-        }],
-        max,
-        color,
-        height,
-        &|v| format!("{v:.1} °C"),
+        |ui| ui.label(RichText::new(caption).small().weak()),
+        |ui| ui.label(RichText::new(scale).small().weak()),
     );
+    graph(
+        ui,
+        vec2(ui.available_width(), height),
+        lines,
+        max,
+        view.settings.graph_points,
+        color,
+        Some(fmt),
+        seconds_per_point(view),
+    );
+    egui::Sides::new().show(
+        ui,
+        |ui| ui.label(RichText::new(seconds_label(view)).small().weak()),
+        |ui| ui.label(RichText::new("0").small().weak()),
+    );
+    ui.add_space(12.0);
 }
 
 fn seconds_label(view: &View<'_>) -> String {
@@ -550,62 +513,72 @@ fn seconds_label(view: &View<'_>) -> String {
     }
 }
 
-/// Large statistics as small cards laid out in a grid that fits the width.
+/// Key figures as caption/value pairs in a grid that fits the width (no boxes).
 fn stat_tiles(ui: &mut Ui, id: &str, stats: &[(&str, String)]) {
     let col_w = 150.0;
-    let gap = 8.0;
+    let gap = 24.0;
     let cols = ((ui.available_width() + gap) / (col_w + gap))
         .floor()
         .max(1.0) as usize;
     let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
-    let dark = ui.visuals().dark_mode;
     egui::Grid::new(id)
         .num_columns(cols)
-        .spacing([gap, gap])
+        .spacing([gap, 14.0])
         .show(ui, |ui| {
             for (i, (caption, value)) in stats.iter().enumerate() {
-                egui::Frame::new()
-                    .fill(super::theme::card_fill(dark))
-                    .stroke(super::theme::card_stroke(dark))
-                    .corner_radius(8.0)
-                    .inner_margin(egui::Margin::symmetric(10, 7))
-                    .show(ui, |ui| {
-                        ui.set_width(w - 22.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.label(RichText::new(*caption).small().weak());
-                            ui.add(egui::Label::new(RichText::new(value).size(17.0)).truncate());
-                        });
-                    });
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(*caption).small().weak());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(value)
+                                .size(16.0)
+                                .color(ui.visuals().strong_text_color()),
+                        )
+                        .truncate(),
+                    );
+                });
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
             }
         });
-    ui.add_space(8.0);
+    ui.add_space(16.0);
 }
 
+/// Static facts below the figures, as a quiet two-column list.
 fn kv_card(ui: &mut Ui, id: &str, title: &str, rows: &[(&str, String)]) {
-    card(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(RichText::new(title).strong());
-        ui.add_space(2.0);
-        egui::Grid::new(id)
-            .num_columns(2)
-            .spacing([24.0, 4.0])
-            .striped(false)
-            .show(ui, |ui| {
-                for (k, v) in rows {
-                    if v.is_empty() {
-                        continue;
-                    }
-                    ui.label(RichText::new(*k).weak());
-                    ui.add(egui::Label::new(v.as_str()).wrap());
-                    ui.end_row();
+    let dark = ui.visuals().dark_mode;
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        r.x_range(),
+        r.top(),
+        egui::Stroke::new(1.0, super::theme::hairline(dark)),
+    );
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(title)
+            .font(super::theme::semibold(13.0))
+            .color(ui.visuals().strong_text_color()),
+    );
+    ui.add_space(4.0);
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([32.0, 6.0])
+        .min_row_height(18.0)
+        .striped(false)
+        .show(ui, |ui| {
+            for (k, v) in rows {
+                if v.is_empty() {
+                    continue;
                 }
-            });
-    });
-    ui.add_space(8.0);
+                ui.label(RichText::new(*k).weak());
+                ui.add(egui::Label::new(v.as_str()).wrap());
+                ui.end_row();
+            }
+        });
+    ui.add_space(16.0);
 }
 
 fn graph_height(ui: &Ui, share: f32) -> f32 {
@@ -617,14 +590,7 @@ fn cpu_view(ui: &mut Ui, view: &View<'_>, logical: &mut bool, kernel: &mut bool)
     let info = &snap.info;
     let h = view.history;
     let cap = view.settings.graph_points;
-    title_row(
-        ui,
-        icon::CPU,
-        colors::CPU,
-        "CPU",
-        &info.cpu_model,
-        snap.cpu.temperature,
-    );
+    title_row(ui, icon::CPU, colors::CPU, "CPU", &info.cpu_model);
     ui.horizontal(|ui| {
         ui.selectable_value(logical, false, format!("{} Overall", icon::CHART_LINE));
         ui.selectable_value(
@@ -720,7 +686,6 @@ fn cpu_view(ui: &mut Ui, view: &View<'_>, logical: &mut bool, kernel: &mut bool)
             &|v| format!("{v:.1}%"),
         );
     }
-    temp_graph(ui, view, &h.cpu_temp, colors::SENSORS, 90.0);
 
     let mut big = vec![
         ("Utilization", fmt_percent(snap.cpu.total)),
@@ -815,7 +780,6 @@ fn memory_view(ui: &mut Ui, view: &View<'_>) {
         colors::MEMORY,
         "Memory",
         &format!("{} installed", fmt_bytes(m.total)),
-        m.temperature,
     );
     let mut lines = vec![Line {
         series: &h.mem,
@@ -898,7 +862,6 @@ fn memory_view(ui: &mut Ui, view: &View<'_>) {
         });
     });
     ui.add_space(8.0);
-    temp_graph(ui, view, &h.mem_temp, colors::SENSORS, 80.0);
     let compressed = m
         .compressed
         .filter(|c| *c > 0)
@@ -958,7 +921,6 @@ fn disk_view(ui: &mut Ui, view: &View<'_>, i: usize, d: &DiskSample, dh: &Device
         colors::DISK,
         &disk_title(i, d),
         &subtitle,
-        d.temperature,
     );
     graph_card(
         ui,
@@ -1001,7 +963,6 @@ fn disk_view(ui: &mut Ui, view: &View<'_>, i: usize, d: &DiskSample, dh: &Device
         graph_height(ui, 0.3),
         &|v| fmt_rate(v as f64),
     );
-    temp_graph(ui, view, &dh.temp, colors::SENSORS, 80.0);
     let mut stats = vec![
         ("Active time", fmt_percent(d.active.unwrap_or(0.0))),
         (
@@ -1048,7 +1009,6 @@ fn net_view(ui: &mut Ui, view: &View<'_>, n: &NetSample, nh: &DeviceHistory) {
         colors::NETWORK,
         &n.kind,
         &format!("{}  ·  {status}", n.id),
-        n.temperature,
     );
     let max = nice_max(nh.a.max().max(nh.b.max()), 12_500.0);
     graph_card(
@@ -1075,7 +1035,6 @@ fn net_view(ui: &mut Ui, view: &View<'_>, n: &NetSample, nh: &DeviceHistory) {
         graph_height(ui, 0.42),
         &|v| fmt_bits(v as f64),
     );
-    temp_graph(ui, view, &nh.temp, colors::SENSORS, 80.0);
     let mut stats = vec![
         ("Receive", fmt_bits(n.rx_bps)),
         ("Send", fmt_bits(n.tx_bps)),
@@ -1123,7 +1082,6 @@ fn gpu_view(ui: &mut Ui, view: &View<'_>, i: usize, g: &GpuSample, gh: &DeviceHi
         colors::GPU,
         &format!("GPU {i}"),
         &g.name,
-        g.temperature,
     );
     if g.util.is_some() {
         graph_card(
@@ -1183,7 +1141,6 @@ fn gpu_view(ui: &mut Ui, view: &View<'_>, i: usize, g: &GpuSample, gh: &DeviceHi
             &|v| format!("{v:.1} W"),
         );
     }
-    temp_graph(ui, view, &gh.temp, colors::SENSORS, 80.0);
     let mut big = vec![(
         "Utilization",
         g.util.map(fmt_percent).unwrap_or_else(|| "—".into()),
@@ -1237,7 +1194,6 @@ fn battery_view(ui: &mut Ui, view: &View<'_>, b: &BatterySample, bh: &DeviceHist
         colors::BATTERY,
         &format!("Battery  {:.0}%", b.percent),
         &format!("{}{ac}", b.status),
-        b.temperature,
     );
     card(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -1341,7 +1297,6 @@ fn sensors_view(ui: &mut Ui, view: &View<'_>) {
         colors::SENSORS,
         "Sensors",
         "Temperatures, fans, power and voltages reported by the hardware",
-        None,
     );
     if snap.sensors.is_empty() {
         ui.label(RichText::new("No hardware sensors were found on this system.").weak());

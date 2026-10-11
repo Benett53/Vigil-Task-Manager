@@ -9,7 +9,7 @@ use crate::settings::{Page, ProcessColumns, Settings, ThemeChoice, UpdateSpeed};
 use crate::ui::dialogs::{
     AffinityDialog, Confirm, Dialogs, Outcome, PropertiesWindow, Retry, RunTask,
 };
-use crate::ui::widgets::{colors, fmt_temp, meter};
+use crate::ui::widgets::colors;
 use crate::ui::{self, Action, View, theme};
 use egui::{Align, Key, Layout, Modifiers, RichText, Ui, ViewportCommand};
 use egui_phosphor::regular as icon;
@@ -58,6 +58,7 @@ pub struct VigilApp {
     history: History,
     app_history: AppHistory,
     proc_history: ProcessHistory,
+    icons: ui::icons::Icons,
     search: String,
     search_lower: String,
     focus_search: bool,
@@ -108,6 +109,7 @@ impl VigilApp {
             history: History::default(),
             app_history,
             proc_history: ProcessHistory::default(),
+            icons: Default::default(),
             search: String::new(),
             search_lower: String::new(),
             focus_search: false,
@@ -396,10 +398,6 @@ impl VigilApp {
                 self.set_status("Usage history deleted".into(), false);
             }
             Action::RefreshNow => self.sampler.send(Command::RefreshNow),
-            Action::ShowPerformance(sel) => {
-                self.page = Page::Performance;
-                self.performance.selected = sel;
-            }
             Action::ExportCsv => {
                 let procs = self.snap.procs.clone();
                 self.spawn_job(move || {
@@ -567,6 +565,7 @@ impl VigilApp {
             app_history: &self.app_history,
             proc_history: &self.proc_history,
             settings: &self.settings,
+            icons: &self.icons,
             search: &self.search_lower,
         }
     }
@@ -660,6 +659,7 @@ impl VigilApp {
                         app_history: &self.app_history,
                         proc_history: &self.proc_history,
                         settings: &self.settings,
+                        icons: &self.icons,
                         search: &self.search_lower,
                     };
                     self.processes.move_selection(&view, delta);
@@ -672,7 +672,7 @@ impl VigilApp {
 
     fn nav_rail(&mut self, ui: &mut Ui) {
         let collapsed = self.settings.nav_collapsed;
-        let width = if collapsed { 56.0 } else { 204.0 };
+        let width = if collapsed { 52.0 } else { 184.0 };
         let dark = ui.visuals().dark_mode;
         egui::Panel::left("nav")
             .resizable(false)
@@ -681,111 +681,104 @@ impl VigilApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::nav_fill(dark))
-                    .inner_margin(egui::Margin::symmetric(8, 10)),
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 12,
+                        bottom: 10,
+                    }),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new(RichText::new(icon::LIST).size(18.0)).frame(false))
-                        .on_hover_text(if collapsed {
-                            "Expand navigation"
-                        } else {
-                            "Collapse navigation"
-                        })
-                        .clicked()
-                    {
-                        self.settings.nav_collapsed = !collapsed;
-                    }
-                    if !collapsed {
-                        ui.label(RichText::new("Vigil").size(16.0).strong());
-                    }
-                });
-                ui.add_space(12.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 32.0),
+                    egui::Sense::click(),
+                );
+                if resp.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                }
+                ui.painter().text(
+                    rect.left_center()
+                        + egui::vec2(if collapsed { rect.width() / 2.0 } else { 16.0 }, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    icon::SIDEBAR_SIMPLE,
+                    egui::FontId::proportional(16.0),
+                    ui.visuals().weak_text_color(),
+                );
+                if !collapsed {
+                    ui.painter().text(
+                        rect.left_center() + egui::vec2(34.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        "Vigil",
+                        theme::semibold(14.0),
+                        ui.visuals().strong_text_color(),
+                    );
+                }
+                if resp
+                    .on_hover_text(if collapsed {
+                        "Expand navigation"
+                    } else {
+                        "Collapse navigation"
+                    })
+                    .clicked()
+                {
+                    self.settings.nav_collapsed = !collapsed;
+                }
+                ui.add_space(14.0);
                 for (i, page) in Page::MAIN.into_iter().enumerate() {
                     self.nav_button(ui, page, collapsed, Some(i + 1));
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     self.nav_button(ui, Page::Settings, collapsed, None);
-                    if !collapsed {
-                        ui.add_space(6.0);
-                        self.nav_summary(ui);
-                    }
                 });
             });
     }
 
-    /// Small live summary at the bottom of the navigation rail.
-    fn nav_summary(&self, ui: &mut Ui) {
-        let s = &self.snap;
-        let mem = s.mem.used as f32 / s.mem.total.max(1) as f32;
-        let w = ui.available_width();
-        for (label, frac, color, extra) in [
-            (
-                "CPU",
-                s.cpu.total / 100.0,
-                colors::CPU,
-                s.cpu.temperature.map(fmt_temp).unwrap_or_default(),
-            ),
-            ("Memory", mem, colors::MEMORY, String::new()),
-        ]
-        .into_iter()
-        .rev()
-        {
-            meter(ui, w, frac, color);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(label).small().weak());
-                ui.label(RichText::new(format!("{:.0}%", frac * 100.0)).small());
-                if !extra.is_empty() {
-                    ui.label(RichText::new(extra).small().weak());
-                }
-            });
-        }
-    }
-
     fn nav_button(&mut self, ui: &mut Ui, page: Page, collapsed: bool, shortcut: Option<usize>) {
         let selected = self.page == page;
-        let dark = ui.visuals().dark_mode;
-        let size = egui::vec2(ui.available_width(), 36.0);
+        let size = egui::vec2(ui.available_width(), 34.0);
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        let visuals = ui.visuals();
         let fill = if selected {
-            colors::ACCENT.gamma_multiply(if dark { 0.22 } else { 0.14 })
+            visuals.widgets.active.weak_bg_fill
         } else if resp.hovered() {
-            ui.visuals().widgets.hovered.weak_bg_fill
+            visuals.widgets.hovered.weak_bg_fill
         } else {
             egui::Color32::TRANSPARENT
         };
-        ui.painter().rect_filled(rect, 8.0, fill);
+        ui.painter().rect_filled(rect, 6.0, fill);
         if selected {
             let bar = egui::Rect::from_min_size(
-                rect.left_center() - egui::vec2(0.0, 8.0),
-                egui::vec2(3.0, 16.0),
+                rect.left_center() - egui::vec2(0.0, 7.0),
+                egui::vec2(3.0, 14.0),
             );
             ui.painter().rect_filled(bar, 1.5, colors::ACCENT);
         }
         let fg = if selected {
-            if dark {
-                egui::Color32::WHITE
-            } else {
-                egui::Color32::from_rgb(10, 60, 58)
-            }
+            visuals.strong_text_color()
         } else {
-            ui.visuals().text_color()
+            visuals.text_color().gamma_multiply(0.85)
         };
         let icon_pos =
-            rect.left_center() + egui::vec2(if collapsed { size.x / 2.0 } else { 18.0 }, 0.0);
+            rect.left_center() + egui::vec2(if collapsed { size.x / 2.0 } else { 16.0 }, 0.0);
         ui.painter().text(
             icon_pos,
             egui::Align2::CENTER_CENTER,
             page.icon(),
-            egui::FontId::proportional(17.0),
+            egui::FontId::proportional(16.0),
             if selected { colors::ACCENT } else { fg },
         );
         if !collapsed {
             ui.painter().text(
-                rect.left_center() + egui::vec2(38.0, 0.0),
+                rect.left_center() + egui::vec2(34.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 page.title(),
-                egui::FontId::proportional(14.0),
+                if selected {
+                    theme::semibold(13.0)
+                } else {
+                    egui::FontId::proportional(13.0)
+                },
                 fg,
             );
         }
@@ -811,38 +804,45 @@ impl VigilApp {
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin {
-                        left: 16,
-                        right: 12,
-                        top: 10,
-                        bottom: 6,
+                        left: 20,
+                        right: 14,
+                        top: 14,
+                        bottom: 10,
                     }),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.page.title()).size(21.0).strong());
-                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new(self.page.title())
+                            .font(theme::semibold(20.0))
+                            .color(ui.visuals().strong_text_color()),
+                    );
+                    ui.add_space(16.0);
                     if self.page != Page::Settings {
                         let dark = ui.visuals().dark_mode;
                         // Leave room for the page's toolbar on the right.
                         let reserve = match self.page {
-                            Page::Processes | Page::Details => 500.0,
-                            _ => 190.0,
+                            Page::Processes | Page::Details => 460.0,
+                            _ => 170.0,
                         };
-                        let search_width = (ui.available_width() - reserve).clamp(120.0, 340.0);
+                        let search_width = (ui.available_width() - reserve).clamp(120.0, 320.0);
                         egui::Frame::new()
-                            .fill(ui.visuals().extreme_bg_color)
-                            .stroke(theme::card_stroke(dark))
-                            .corner_radius(16.0)
-                            .inner_margin(egui::Margin::symmetric(10, 3))
+                            .fill(if dark {
+                                ui.visuals().extreme_bg_color
+                            } else {
+                                ui.visuals().widgets.inactive.weak_bg_fill
+                            })
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(10, 5))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
                                     ui.label(RichText::new(icon::MAGNIFYING_GLASS).weak());
                                     let edit = ui.add(
                                         egui::TextEdit::singleline(&mut self.search)
-                                            .hint_text(
-                                                "Search name, PID, user or command  (Ctrl+F)",
-                                            )
+                                            .hint_text("Search  (Ctrl+F)")
                                             .frame(egui::Frame::NONE)
+                                            .margin(egui::Margin::ZERO)
                                             .desired_width(search_width),
                                     );
                                     if self.focus_search {
@@ -878,6 +878,7 @@ impl VigilApp {
             app_history: &self.app_history,
             proc_history: &self.proc_history,
             settings: &self.settings,
+            icons: &self.icons,
             search: &self.search_lower,
         };
         match self.page {
@@ -899,7 +900,6 @@ impl VigilApp {
                 let mut group = self.settings.group_by_type;
                 let mut kernel = self.settings.show_kernel_threads;
                 let mut heat = self.settings.heatmap;
-                let mut overview = self.settings.show_overview;
                 let mut detail_pane = self.settings.show_process_details;
                 let mut tree = self.settings.details_tree;
                 let mut expand_all = None;
@@ -913,7 +913,6 @@ impl VigilApp {
                         ui.checkbox(&mut tree, "Show as process tree");
                     } else {
                         ui.checkbox(&mut group, "Group by type");
-                        ui.checkbox(&mut overview, "Show resource overview");
                         ui.checkbox(&mut detail_pane, "Show details of the selection");
                         ui.checkbox(&mut heat, "Heat map colors");
                     }
@@ -978,7 +977,6 @@ impl VigilApp {
                 self.settings.group_by_type = group;
                 self.settings.show_kernel_threads = kernel;
                 self.settings.heatmap = heat;
-                self.settings.show_overview = overview;
                 self.settings.show_process_details = detail_pane;
                 self.settings.details_tree = tree;
                 if details {
@@ -991,13 +989,7 @@ impl VigilApp {
         }
         if self.page != Page::Settings
             && ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(format!("{} Run new task", icon::PLAY))
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(colors::ACCENT),
-                )
+                .button(format!("{} Run new task", icon::PLUS))
                 .on_hover_text("Start a program (Ctrl+N)")
                 .clicked()
         {
@@ -1056,46 +1048,26 @@ impl VigilApp {
         });
     }
 
+    /// Thin bar at the bottom, only shown while there is something to report.
     fn status_bar(&mut self, ui: &mut Ui) {
+        let message = self
+            .status
+            .as_ref()
+            .filter(|(_, at, _)| at.elapsed() < Duration::from_secs(8));
+        let paused = self.settings.update_speed == UpdateSpeed::Paused;
+        if message.is_none() && !paused && self.running_jobs == 0 {
+            return;
+        }
         egui::Panel::bottom("status")
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin::symmetric(14, 5)),
+                    .inner_margin(egui::Margin::symmetric(20, 6)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let s = &self.snap;
-                    let mem_pct = s.mem.used as f64 / s.mem.total.max(1) as f64 * 100.0;
-                    let item = |ui: &mut Ui, ic: &str, text: String| {
-                        ui.label(RichText::new(ic).small().color(colors::ACCENT));
-                        ui.label(RichText::new(text).small().weak());
-                        ui.add_space(6.0);
-                    };
-                    item(
-                        ui,
-                        icon::LIST_BULLETS,
-                        format!("{} processes", s.sys.processes),
-                    );
-                    item(ui, icon::CPU, format!("CPU {:.0}%", s.cpu.total));
-                    if let Some(t) = s.cpu.temperature {
-                        item(ui, icon::THERMOMETER_SIMPLE, fmt_temp(t));
-                    }
-                    item(ui, icon::MEMORY, format!("Memory {mem_pct:.0}%"));
-                    if let Some(b) = s.batteries.first() {
-                        item(
-                            ui,
-                            icon::BATTERY_HIGH,
-                            format!("{:.0}%  {}", b.percent, b.status),
-                        );
-                    }
-                    item(
-                        ui,
-                        icon::CLOCK,
-                        format!("Up {}", crate::util::fmt_uptime(s.sys.uptime_secs)),
-                    );
-                    if self.settings.update_speed == UpdateSpeed::Paused {
+                    if paused {
                         ui.label(
                             RichText::new(format!("{} Updates paused", icon::PAUSE))
                                 .small()
@@ -1149,6 +1121,7 @@ impl eframe::App for VigilApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.icons.pump(&ctx);
         self.apply_settings(&ctx);
         let mut actions = Vec::new();
         self.keyboard(&ctx, &mut actions);
@@ -1187,6 +1160,7 @@ impl eframe::App for VigilApp {
                 app_history: &self.app_history,
                 proc_history: &self.proc_history,
                 settings: &self.settings,
+                icons: &self.icons,
                 search: &self.search_lower,
             };
             match self.page {

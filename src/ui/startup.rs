@@ -104,6 +104,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
     }
     let mut sort_state = state.sort;
     let mut new_sel = None;
+    super::table::quiet_lines(ui);
     TableBuilder::new(ui)
         .id_salt("startup")
         .striped(true)

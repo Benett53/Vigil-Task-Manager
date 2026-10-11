@@ -34,6 +34,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-10-11">
+      <description>
+        <p>Quieter interface and much lower resource usage.</p>
+        <ul>
+          <li>System UI font, calmer colors, duplicated panels and tiles removed</li>
+          <li>The Processes page no longer redraws continuously</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-04">
       <description>
         <p>Temperatures and sensors everywhere, a redesigned and clearer interface, and lower resource usage.</p>

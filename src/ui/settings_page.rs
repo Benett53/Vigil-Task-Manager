@@ -82,7 +82,6 @@ pub fn show(ui: &mut Ui, s: &mut Settings) -> bool {
             ui.checkbox(&mut s.group_by_type, "Group processes by type");
             ui.checkbox(&mut s.show_kernel_threads, "Show kernel threads");
             ui.checkbox(&mut s.show_full_account_name, "Show full account name on the Users page");
-            ui.checkbox(&mut s.show_overview, "Show the resource overview above the process list");
             ui.checkbox(&mut s.show_process_details, "Show details of the selected process");
             ui.checkbox(&mut s.details_tree, "Show the Details page as a process tree");
         });

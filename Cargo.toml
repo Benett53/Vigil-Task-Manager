@@ -1,6 +1,6 @@
 [package]
 name = "vigil"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Fast, free and open source task manager for Linux and Windows, in the style of the Windows Task Manager"
@@ -30,11 +30,20 @@ default = ["nvidia"]
 nvidia = ["dep:nvml-wrapper"]
 
 [target.'cfg(windows)'.dependencies]
-sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network", "user", "component"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system", "component"] }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemInformation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_Threading",
