@@ -6,7 +6,7 @@
 
 Task manager for Linux and Windows, modeled on the Windows Task Manager.
 
-[![CI](https://github.com/baba537/Vigil-Task-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/baba537/Vigil-Task-Manager/actions/workflows/ci.yml)
+[![CI](https://github.com/Benett53/Vigil-Task-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Benett53/Vigil-Task-Manager/actions/workflows/ci.yml)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPLv3+-blue.svg)](LICENSE)
 
 <img src="docs/screenshots/processes-light.png" width="49%" alt="Processes page (light theme)">
@@ -46,7 +46,7 @@ On Linux, temperatures and other sensors come from `hwmon` and the thermal inter
 
 ## Installation
 
-Downloads are on the [Releases page](https://github.com/baba537/Vigil-Task-Manager/releases).
+Downloads are on the [Releases page](https://github.com/Benett53/Vigil-Task-Manager/releases).
 
 | System | Package |
 |---|---|
