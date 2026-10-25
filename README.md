@@ -9,7 +9,7 @@ Task manager for Linux and Windows, modeled on the Windows Task Manager.
 [![CI](https://github.com/Benett53/Vigil-Task-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Benett53/Vigil-Task-Manager/actions/workflows/ci.yml)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPLv3+-blue.svg)](LICENSE)
 
-<img src="docs/screenshots/performance-cpu.png" width="49%" alt="Performance page, CPU per logical processor">
+<img src="docs/screenshots/processes-light.png" width="49%" alt="Processes page (light theme)">
 <img src="docs/screenshots/performance-gpu.png" width="49%" alt="Performance page, GPU">
 
 </div>
@@ -26,7 +26,7 @@ Task manager for Linux and Windows, modeled on the Windows Task Manager.
 | Details | All processes with technical columns, optional tree view |
 | Services | systemd (system and user) or OpenRC on Linux, Service Control Manager on Windows |
 
-![Performance page](docs/screenshots/performance.gif)
+![Processes and performance pages](docs/screenshots/demo.gif)
 
 Process actions: end task, end process tree, kill, suspend/resume, efficiency mode, priority, affinity,
 open file location, properties, copy, run new task. Actions on processes of other users can be retried
