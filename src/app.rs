@@ -50,6 +50,7 @@ struct Applied {
 
 pub struct VigilApp {
     settings: Settings,
+    updater: crate::update::Updater,
     applied: Option<Applied>,
     page: Page,
     sampler: Sampler,
@@ -99,7 +100,17 @@ impl VigilApp {
             move || wake_ctx.request_repaint(),
         );
         let (jobs_tx, jobs_rx) = mpsc::channel();
+        let updater = {
+            let wake = ctx.clone();
+            let state = eframe::storage_dir(crate::APP_ID)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("last-update-check");
+            crate::update::Updater::new(settings.check_updates, state, move || {
+                wake.request_repaint()
+            })
+        };
         VigilApp {
+            updater,
             page: start_page.unwrap_or(settings.start_page),
             settings,
             applied: None,
@@ -769,6 +780,12 @@ impl VigilApp {
             egui::FontId::proportional(16.0),
             if selected { colors::ACCENT } else { fg },
         );
+        // A small dot instead of a pop-up when a new version is out.
+        let update_ready = page == Page::Settings && self.updater.available().is_some();
+        if update_ready {
+            ui.painter()
+                .circle_filled(icon_pos + egui::vec2(7.0, -7.0), 3.5, colors::ACCENT);
+        }
         if !collapsed {
             ui.painter().text(
                 rect.left_center() + egui::vec2(34.0, 0.0),
@@ -784,6 +801,9 @@ impl VigilApp {
         }
         let hint = match shortcut {
             Some(n) => format!("{}  (Ctrl+{n})", page.title()),
+            None if update_ready => {
+                format!("{}  (Ctrl+,) - a new version is available", page.title())
+            }
             None => format!("{}  (Ctrl+,)", page.title()),
         };
         let resp = resp
@@ -1104,6 +1124,11 @@ impl VigilApp {
 impl eframe::App for VigilApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        self.updater.set_automatic(self.settings.check_updates);
+        // The new version is being installed and takes over from here.
+        if self.updater.wants_exit() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         // Only pages that show per-process data need a full process scan every refresh.
         // Elsewhere (and while the window is hidden) processes are rescanned every 5th
         // refresh, which keeps App history accurate at a fraction of the cost.
@@ -1194,7 +1219,7 @@ impl eframe::App for VigilApp {
                     self.settings.show_user_services = user;
                 }
                 Page::Settings => {
-                    if ui::settings_page::show(ui, &mut self.settings) {
+                    if ui::settings_page::show(ui, &mut self.settings, &self.updater) {
                         self.settings = Settings::default();
                     }
                 }

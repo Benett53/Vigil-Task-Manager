@@ -219,6 +219,8 @@ pub struct Settings {
     pub show_process_details: bool,
     /// Process tree instead of a flat list on the Details page.
     pub details_tree: bool,
+    /// Ask GitHub for a newer release at most once a day.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -247,6 +249,7 @@ impl Default for Settings {
             show_user_services: false,
             show_process_details: false,
             details_tree: false,
+            check_updates: true,
         }
     }
 }

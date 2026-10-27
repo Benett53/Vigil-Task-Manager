@@ -52,6 +52,15 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 [Run]
 Filename: "{app}\vigil.exe"; Description: "Start {#AppName}"; \
   Flags: nowait postinstall skipifsilent
+Filename: "{app}\vigil.exe"; Flags: nowait runasoriginaluser; Check: RestartAfterUpdate
 
 ; Settings and app history in %APPDATA%\io.github.baba537.Vigil are the user's data
 ; and stay in place, so a reinstall keeps them.
+
+[Code]
+{ Vigil passes /restartapp=1 when it installs an update of itself, so it comes
+  back after the silent install instead of staying closed. }
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:restartapp|0}') = '1');
+end;

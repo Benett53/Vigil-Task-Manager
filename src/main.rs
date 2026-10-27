@@ -10,6 +10,7 @@ mod platform;
 mod sampler;
 mod settings;
 mod ui;
+mod update;
 mod util;
 
 use std::process::ExitCode;
@@ -24,6 +25,7 @@ fn print_help() {
          \x20   --page <PAGE>  Open a page: processes, performance, history, startup,\n\
          \x20                  users, details, services or settings\n\
          \x20   --snapshot     Print a one-shot system summary to stdout and exit\n\
+         \x20   --update       Install the latest release if it is newer\n\
          \x20   -V, --version  Print version information\n\
          \x20   -h, --help     Print this help\n\n\
          ENVIRONMENT:\n\
@@ -191,6 +193,9 @@ fn main() -> ExitCode {
             "--snapshot" => {
                 print_snapshot();
                 return ExitCode::SUCCESS;
+            }
+            "--update" => {
+                return ExitCode::from(update::run_cli() as u8);
             }
             other => {
                 eprintln!("vigil: unknown option '{other}' (see --help)");

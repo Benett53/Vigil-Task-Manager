@@ -32,7 +32,7 @@ Process actions: end task, end process tree, kill, suspend/resume, efficiency mo
 open file location, properties, copy, run new task. Actions on processes of other users can be retried
 as administrator (polkit on Linux, UAC on Windows).
 
-Vigil does not open network connections. Settings and app history are stored locally.
+Settings and app history are stored locally. The only network connection is the update check (see [Updates](#updates)).
 
 ### GPU support
 
@@ -57,6 +57,19 @@ Downloads are on the [Releases page](https://github.com/Benett53/Vigil-Task-Mana
 | Arch | [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) (`makepkg -si`) |
 | Any Linux distribution | `vigil-<version>-linux-x86_64.tar.gz`, then `./install.sh` (user) or `sudo ./install.sh --system` |
 | Windows 10 / 11 | `VigilSetup-<version>.exe` (installs per user, no administrator rights; updates in place) or the portable `vigil-<version>-windows-x86_64.zip` |
+
+### Updates
+
+Settings → Updates shows the version and has a button that downloads and installs the latest release;
+Vigil then starts again. A small dot on Settings in the navigation shows when a new version is out. With
+"Check for updates automatically once a day" on, Vigil asks GitHub for the latest release at most once a
+day. `vigil --update` does the same from a terminal.
+
+The updater installs the same kind of package Vigil came from: the Windows setup or the portable zip, the
+`.deb` through apt, the `.rpm` through dnf or zypper, the tarball through its `install.sh`. Installing a
+package asks for the administrator password; installations through the Arch `PKGBUILD` are updated there.
+Nothing is installed unless `SHA256SUMS.txt` carries a valid minisign signature from the key built into
+Vigil and the downloaded file matches its checksum.
 
 Linux binaries are built for x86_64 and aarch64 against glibc 2.28. Requirements: OpenGL 2.0 or OpenGL ES 2.0,
 `libxkbcommon`, X11 or Wayland. Optional: `polkit` for administrator actions, `hwdata` for GPU names.

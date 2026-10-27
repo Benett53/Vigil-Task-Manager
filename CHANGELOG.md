@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-10-27
+
+### Added
+- Updates from the settings: the current version, "Check for updates" and "Download and install". A
+  small dot on Settings shows when a new version is out; there are no pop-ups.
+- Automatic check at most once a day, switchable in the settings. This is the only network connection.
+- `vigil --update` installs the latest release from a terminal.
+- Releases carry a minisign signature of `SHA256SUMS.txt`. An update is installed only if the signature
+  and the checksum match.
+
 ## [0.3.0] - 2026-10-11
 
 ### Added

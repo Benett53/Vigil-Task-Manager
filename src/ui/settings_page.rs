@@ -1,6 +1,7 @@
 //! "Settings" page.
 
 use crate::settings::{Page, Settings, ThemeChoice, UpdateSpeed};
+use crate::update::{CURRENT_VERSION, Status, Updater};
 use egui::{RichText, ScrollArea, Ui};
 use egui_phosphor::regular as icon;
 
@@ -25,7 +26,7 @@ fn section(ui: &mut Ui, ic: &str, title: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Returns `true` if the user asked to reset all settings.
-pub fn show(ui: &mut Ui, s: &mut Settings) -> bool {
+pub fn show(ui: &mut Ui, s: &mut Settings, updater: &Updater) -> bool {
     let mut reset = false;
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         section(ui, icon::PALETTE, "Appearance", |ui| {
@@ -90,8 +91,10 @@ pub fn show(ui: &mut Ui, s: &mut Settings) -> bool {
             ui.checkbox(&mut s.show_virtual_adapters, "Show virtual network adapters");
         });
 
+        section(ui, icon::ARROW_CIRCLE_UP, "Updates", |ui| updates(ui, s, updater));
+
         section(ui, icon::SHIELD_CHECK, "Privacy", |ui| {
-            ui.label("Vigil never sends any data anywhere. There is no telemetry, no update check and no account.");
+            ui.label("Vigil sends no data anywhere. There is no telemetry and no account. The only connection is the update check, which asks GitHub for the latest release.");
             ui.label(RichText::new("Settings and app history are stored locally in your user profile.").weak());
         });
 
@@ -102,4 +105,63 @@ pub fn show(ui: &mut Ui, s: &mut Settings) -> bool {
         ui.add_space(20.0);
     });
     reset
+}
+
+fn updates(ui: &mut Ui, s: &mut Settings, updater: &Updater) {
+    let status = updater.status();
+    ui.horizontal(|ui| {
+        ui.label(format!("Version {CURRENT_VERSION}"));
+        let line = match &status {
+            Status::Idle => None,
+            Status::Checking => Some(RichText::new("Checking...").weak()),
+            Status::UpToDate => Some(RichText::new("Up to date").weak()),
+            Status::Available(release) => Some(
+                RichText::new(format!("Version {} is available", release.version))
+                    .color(super::widgets::colors::ACCENT),
+            ),
+            Status::Downloading(received, Some(total)) if *total > 0 => {
+                Some(RichText::new(format!("Downloading... {} %", received * 100 / total)).weak())
+            }
+            Status::Downloading(..) => Some(RichText::new("Downloading...").weak()),
+            Status::Installing => Some(RichText::new("Installing, Vigil restarts...").weak()),
+            Status::Failed(error) => Some(RichText::new(error).color(ui.visuals().error_fg_color)),
+        };
+        if let Some(line) = line {
+            ui.label(line);
+        }
+    });
+    let busy = matches!(
+        status,
+        Status::Checking | Status::Downloading(..) | Status::Installing
+    );
+    let ctx = ui.ctx().clone();
+    let wake = move || ctx.request_repaint();
+    ui.add_enabled_ui(!busy, |ui| match &status {
+        Status::Available(release) => {
+            let label = format!(
+                "{} Download and install {}",
+                icon::DOWNLOAD_SIMPLE,
+                release.version
+            );
+            if ui.button(label).clicked() {
+                updater.install(release.clone(), wake);
+            }
+        }
+        _ => {
+            if ui
+                .button(format!("{} Check for updates", icon::ARROWS_CLOCKWISE))
+                .clicked()
+            {
+                updater.check(wake);
+            }
+        }
+    });
+    if busy {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    ui.checkbox(
+        &mut s.check_updates,
+        "Check for updates automatically once a day",
+    );
 }
