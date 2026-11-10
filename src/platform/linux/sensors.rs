@@ -7,6 +7,7 @@
 
 use super::procfs::{read_trimmed, read_u64};
 use crate::model::{BatterySample, SensorKind, SensorReading};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -42,8 +43,34 @@ pub struct Sensors {
     chips: Vec<Chip>,
     thermal_cpu: Option<PathBuf>,
     discovered: Option<Instant>,
+    /// Values of chips that are slow to read, by display name, reused until
+    /// the chip is due again.
+    held: HashMap<String, Held>,
     pub readings: Vec<SensorReading>,
     pub chip_values: Vec<ChipValues>,
+}
+
+/// The last values of a slow chip and when to ask it again.
+struct Held {
+    until: Instant,
+    readings: Vec<SensorReading>,
+    temps: Vec<(String, f32)>,
+}
+
+/// A chip that takes longer than this to read is asking a device rather than
+/// reading a register: an NVMe drive answers with its SMART log in 3 to 12 ms,
+/// a Wi-Fi card asks its firmware for about 18 ms. Read on every refresh,
+/// two such chips took three quarters of the refresh time.
+const SLOW_READ: Duration = Duration::from_millis(1);
+
+/// A slow chip is read again after this many times what the read took, which
+/// keeps it at half a percent of the time; never more than `HOLD_LIMIT`.
+const HOLD_FACTOR: u32 = 200;
+const HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long the values of a chip are reused after a read that took `cost`.
+fn hold_for(cost: Duration) -> Option<Duration> {
+    (cost > SLOW_READ).then(|| (cost * HOLD_FACTOR).min(HOLD_LIMIT))
 }
 
 fn scale(kind: SensorKind) -> f32 {
@@ -91,6 +118,7 @@ impl Sensors {
             chips: Vec::new(),
             thermal_cpu: None,
             discovered: None,
+            held: HashMap::new(),
             readings: Vec::new(),
             chip_values: Vec::new(),
         }
@@ -216,7 +244,22 @@ impl Sensors {
         }
         self.readings.clear();
         self.chip_values.clear();
+        let now = Instant::now();
         for chip in &self.chips {
+            if let Some(held) = self.held.get(&chip.display)
+                && now < held.until
+            {
+                self.readings.extend(held.readings.iter().cloned());
+                self.chip_values.push(ChipValues {
+                    driver: chip.driver.clone(),
+                    device: chip.device.clone(),
+                    temps: held.temps.clone(),
+                });
+                continue;
+            }
+
+            let started = Instant::now();
+            let first = self.readings.len();
             let mut temps = Vec::new();
             for input in &chip.inputs {
                 let Some(raw) = read_trimmed(&input.input).and_then(|v| v.parse::<f64>().ok())
@@ -239,6 +282,21 @@ impl Sensors {
                     high: input.high,
                     crit: input.crit,
                 });
+            }
+            match hold_for(started.elapsed()) {
+                Some(hold) => {
+                    self.held.insert(
+                        chip.display.clone(),
+                        Held {
+                            until: Instant::now() + hold,
+                            readings: self.readings[first..].to_vec(),
+                            temps: temps.clone(),
+                        },
+                    );
+                }
+                None => {
+                    self.held.remove(&chip.display);
+                }
             }
             self.chip_values.push(ChipValues {
                 driver: chip.driver.clone(),
@@ -432,6 +490,16 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn only_slow_chips_are_held_and_never_for_long() {
+        assert_eq!(hold_for(Duration::from_micros(80)), None);
+        assert_eq!(
+            hold_for(Duration::from_millis(12)),
+            Some(Duration::from_millis(2400))
+        );
+        assert_eq!(hold_for(Duration::from_millis(400)), Some(HOLD_LIMIT));
+    }
 
     fn write(p: &Path, content: &str) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();

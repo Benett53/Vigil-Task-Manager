@@ -345,6 +345,40 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
     })
 }
 
+/// A new folder in the temporary directory that only this user can open
+/// (Linux: mode 0700; Windows: the temporary folder is per user anyway).
+///
+/// `/tmp` is writable by every account. With a fixed name another user could
+/// prepare the folder and swap the download between the checksum check and
+/// the installation. The folder must not exist yet, so one prepared by
+/// someone else is never used.
+fn private_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::hash::{BuildHasher as _, Hasher as _};
+
+    let base = std::env::temp_dir();
+    for attempt in 0..8u32 {
+        // Each `RandomState` is seeded by the system. The name only has to be
+        // unlikely to exist: creating the folder fails if it does.
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(attempt);
+        let dir = base.join(format!("{prefix}{:016x}", hasher.finish()));
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+}
+
 /// Stream `url` into `dest`, returning the SHA-256 of what was written.
 fn download(url: &str, dest: &Path, progress: &impl Fn(u64, Option<u64>)) -> Result<String> {
     let response = agent().get(url).call().map_err(|e| e.to_string())?;
@@ -395,8 +429,10 @@ fn download_and_install(
     let expected = expected_hash(&sums, &plan.asset)
         .ok_or_else(|| format!("{} is not in the checksum list", plan.asset))?;
 
-    let dir = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}", release.version));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A private, newly created folder: nobody else can swap the download
+    // between the checksum check and the installation.
+    let dir = private_temp_dir(&format!("{TEMP_PREFIX}{}-", release.version))
+        .map_err(|e| e.to_string())?;
     let file = dir.join(&plan.asset);
     let actual = download(&asset.url, &file, &progress)?;
     if actual != expected {
@@ -727,6 +763,21 @@ fn replace_executable(new: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_download_folder_is_new_and_private() {
+        let first = private_temp_dir("update-test-").unwrap();
+        let second = private_temp_dir("update-test-").unwrap();
+        assert_ne!(first, second);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir(&first);
+        let _ = std::fs::remove_dir(&second);
+    }
 
     #[test]
     fn compares_versions_numerically() {

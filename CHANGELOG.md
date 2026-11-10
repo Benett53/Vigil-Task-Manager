@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Linux: sensors that are slow to read, such as the temperature of NVMe drives and Wi-Fi cards, are
+  asked every few seconds instead of on every refresh. On a system with two NVMe drives and a Wi-Fi
+  card a refresh took 50 ms, of which 37 ms went into these sensors.
+
+### Fixed
+- `vigil --snapshot` printed GPU load and memory as raw debug values (`Some(37.0)`); it now prints
+  percent and sizes.
+
+### Security
+- Linux: the updater downloaded into a folder with a fixed name in the shared temporary directory. Another
+  local user could prepare that folder and swap the file between the checksum check and the installation.
+  The folder is now created anew for each update, with an unpredictable name and for this user only.
+- Updated `tokio` to 1.54.1 (RUSTSEC-2026-0386).
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

@@ -91,10 +91,19 @@ fn print_snapshot() {
         );
     }
     for g in &s.gpus {
+        let util = g
+            .util
+            .map_or_else(|| "n/a".to_string(), |u| format!("{u:.0}%"));
+        let vram = match (g.mem_used, g.mem_total) {
+            (Some(used), Some(total)) => format!("{} / {}", fmt_bytes(used), fmt_bytes(total)),
+            (Some(used), None) => fmt_bytes(used),
+            (None, Some(total)) => format!("{} total", fmt_bytes(total)),
+            (None, None) => "n/a".to_string(),
+        };
         let _ = writeln!(
             out,
-            "GPU:         {} [{}] — util {:?}, vram {:?}/{:?}",
-            g.name, g.driver, g.util, g.mem_used, g.mem_total
+            "GPU:         {} [{}] — {util} used, VRAM {vram}",
+            g.name, g.driver
         );
     }
     if let Some(t) = s.cpu.temperature {
