@@ -13,6 +13,12 @@ All notable changes to this project are documented in this file.
 - `vigil --snapshot` printed GPU load and memory as raw debug values (`Some(37.0)`); it now prints
   percent and sizes.
 
+### Security
+- Linux: the updater downloaded into a folder with a fixed name in the shared temporary directory. Another
+  local user could prepare that folder and swap the file between the checksum check and the installation.
+  The folder is now created anew for each update, with an unpredictable name and for this user only.
+- Updated `tokio` to 1.54.1 (RUSTSEC-2026-0386).
+
 ## [0.4.0] - 2026-10-27
 
 ### Added
