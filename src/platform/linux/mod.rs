@@ -426,3 +426,57 @@ fn static_info() -> StaticInfo {
     }
     info
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::time::Duration;
+
+    /// Where the time of one refresh goes:
+    /// `cargo test --release -- --ignored --nocapture sample_breakdown`
+    #[test]
+    #[ignore]
+    fn sample_breakdown() {
+        let mut c = Collector::new();
+        c.sample(true);
+        let runs = 20u32;
+        let mut parts = [Duration::ZERO; 6];
+        for _ in 0..runs {
+            std::thread::sleep(Duration::from_millis(250));
+            let mut t = Instant::now();
+            let mut lap = |slot: &mut Duration| {
+                *slot += t.elapsed();
+                t = Instant::now();
+            };
+            c.sensors.refresh();
+            lap(&mut parts[0]);
+            let _ = c.sample_cpu(0.25);
+            let _ = c.sample_mem();
+            lap(&mut parts[1]);
+            let _ = c.disks.sample(0.25, &c.sensors);
+            let _ = c.nets.sample(0.25, &c.sensors);
+            lap(&mut parts[2]);
+            c.gpu.begin(0.25);
+            let r = c
+                .scanner
+                .scan(c.info.logical, &c.apps, &mut c.users, &mut c.gpu);
+            lap(&mut parts[3]);
+            assert!(!r.procs.is_empty());
+            let _ = c.gpu.finish();
+            lap(&mut parts[4]);
+            let _ = sensors::batteries(&sys_root());
+            lap(&mut parts[5]);
+        }
+        let names = [
+            "sensors",
+            "cpu+mem",
+            "disks+nets",
+            "process scan",
+            "gpu",
+            "batteries",
+        ];
+        for (name, total) in names.iter().zip(parts) {
+            println!("{name:>13}: {:?}", total / runs);
+        }
+    }
+}

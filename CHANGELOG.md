@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Linux: sensors that are slow to read, such as the temperature of NVMe drives and Wi-Fi cards, are
+  asked every few seconds instead of on every refresh. On a system with two NVMe drives and a Wi-Fi
+  card a refresh took 50 ms, of which 37 ms went into these sensors.
+
+### Fixed
+- `vigil --snapshot` printed GPU load and memory as raw debug values (`Some(37.0)`); it now prints
+  percent and sizes.
+
 ## [0.4.0] - 2026-10-27
 
 ### Added
