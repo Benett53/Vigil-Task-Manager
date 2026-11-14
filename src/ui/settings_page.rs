@@ -73,8 +73,10 @@ pub fn show(ui: &mut Ui, s: &mut Settings, updater: &Updater) -> bool {
         });
 
         section(ui, icon::APP_WINDOW, "Window management", |ui| {
-            ui.checkbox(&mut s.always_on_top, "Always on top")
-                .on_hover_text("Not every Wayland compositor allows applications to stay on top.");
+            ui.checkbox(&mut s.always_on_top, "Always on top").on_hover_text(
+                "On Wayland this works on KDE Plasma; other compositors may ignore it.",
+            );
+            ui.checkbox(&mut s.compact_on_top, "Keep summary and mini view on top");
             ui.checkbox(&mut s.minimize_on_use, "Minimize after starting a new task");
         });
 

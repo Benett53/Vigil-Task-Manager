@@ -4,12 +4,14 @@ pub mod actions;
 pub mod desktop;
 mod devices;
 mod gpu;
+pub mod icons;
 mod process;
 pub mod procfs;
 mod sensors;
 pub mod services;
 pub mod startup;
 pub mod users;
+pub mod window;
 
 use crate::model::{CpuSample, MemSample, Process, Snapshot, StaticInfo, SystemSample};
 use procfs::{

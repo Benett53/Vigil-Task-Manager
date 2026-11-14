@@ -89,6 +89,8 @@ cargo build --release
 ```
 vigil                      start the GUI
 vigil --page performance   open a page: processes, performance, history, startup, users, details, services, settings
+vigil --summary            open only the device list of the Performance page
+vigil --mini cpu           open only one graph: cpu, memory, disk, network, gpu, battery, sensors
 vigil --snapshot           print a system summary and exit
 ```
 

@@ -24,15 +24,60 @@ pub enum PerfSel {
 
 pub struct State {
     pub selected: PerfSel,
+    /// Device kind to select once devices are known (from `--mini`).
+    pub pending_kind: Option<DeviceKind>,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
             selected: PerfSel::Cpu,
+            pending_kind: None,
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    Cpu,
+    Memory,
+    Disk,
+    Network,
+    Gpu,
+    Battery,
+    Sensors,
+}
+
+impl DeviceKind {
+    pub fn from_cli(name: &str) -> Option<DeviceKind> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "cpu" => DeviceKind::Cpu,
+            "memory" | "mem" | "ram" => DeviceKind::Memory,
+            "disk" => DeviceKind::Disk,
+            "network" | "net" => DeviceKind::Network,
+            "gpu" => DeviceKind::Gpu,
+            "battery" => DeviceKind::Battery,
+            "sensors" => DeviceKind::Sensors,
+            _ => return None,
+        })
+    }
+
+    fn matches(self, sel: &PerfSel) -> bool {
+        matches!(
+            (self, sel),
+            (DeviceKind::Cpu, PerfSel::Cpu)
+                | (DeviceKind::Memory, PerfSel::Memory)
+                | (DeviceKind::Disk, PerfSel::Disk(_))
+                | (DeviceKind::Network, PerfSel::Net(_))
+                | (DeviceKind::Gpu, PerfSel::Gpu(_))
+                | (DeviceKind::Battery, PerfSel::Battery(_))
+                | (DeviceKind::Sensors, PerfSel::Sensors)
+        )
+    }
+}
+
+/// Size of the mini view window, in points.
+pub const GRAPH_WINDOW_SIZE: [f32; 2] = [420.0, 260.0];
 
 /// Rounds up to a "nice" axis maximum (1, 2, 5 x 10^n).
 pub fn nice_max(v: f32, floor: f32) -> f32 {
@@ -104,29 +149,206 @@ fn seconds_per_point(view: &View<'_>) -> f32 {
     view.settings.update_speed.interval().as_secs_f32()
 }
 
+/// The two small window modes of the page (Task Manager's "summary view").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compact {
+    /// Only the device list.
+    Summary,
+    /// Only the graph of the selected device.
+    Graph,
+}
+
+impl Compact {
+    /// Window title; distinct per mode so window managers remember each size separately.
+    pub fn window_title(self) -> &'static str {
+        match self {
+            Compact::Summary => "Vigil – Summary",
+            Compact::Graph => "Vigil – Mini view",
+        }
+    }
+}
+
+/// What the page asks the window to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    Compact(Compact),
+    FullView,
+    ToggleOnTop,
+}
+
+/// One entry of the device list, with what its sparkline and mini view draw.
+struct Device<'a> {
+    spec: CardSpec,
+    series: &'a Series,
+    series2: Option<&'a Series>,
+    max: f32,
+}
+
+fn devices<'a>(view: &View<'a>) -> Vec<Device<'a>> {
+    let snap = view.snap;
+    let h = view.history;
+    let mut out = Vec::new();
+    let freq = snap.cpu.freq_mhz.map(fmt_freq_mhz).unwrap_or_default();
+    out.push(Device {
+        spec: CardSpec {
+            sel: PerfSel::Cpu,
+            icon: icon::CPU,
+            title: "CPU".into(),
+            value: fmt_percent(snap.cpu.total),
+            subtitle: freq,
+            color: colors::CPU,
+        },
+        series: &h.cpu,
+        series2: None,
+        max: 100.0,
+    });
+    out.push(Device {
+        spec: CardSpec {
+            sel: PerfSel::Memory,
+            icon: icon::MEMORY,
+            title: "Memory".into(),
+            value: fmt_percent(snap.mem.used as f32 / snap.mem.total.max(1) as f32 * 100.0),
+            subtitle: format!(
+                "{} / {}",
+                fmt_bytes(snap.mem.used),
+                fmt_bytes(snap.mem.total)
+            ),
+            color: colors::MEMORY,
+        },
+        series: &h.mem,
+        series2: None,
+        max: 100.0,
+    });
+    for (i, d) in snap.disks.iter().enumerate() {
+        if let Some(dh) = h.disks.get(&d.id) {
+            out.push(Device {
+                spec: CardSpec {
+                    sel: PerfSel::Disk(d.id.clone()),
+                    icon: icon::HARD_DRIVES,
+                    title: disk_title(i, d),
+                    value: fmt_percent(d.active.unwrap_or(0.0)),
+                    subtitle: d.kind.clone(),
+                    color: colors::DISK,
+                },
+                series: &dh.a,
+                series2: None,
+                max: 100.0,
+            });
+        }
+    }
+    for n in visible_nets(view) {
+        if let Some(nh) = h.nets.get(&n.id) {
+            let sub = if n.connected {
+                format!(
+                    "{} {}  {} {}",
+                    icon::ARROW_DOWN,
+                    fmt_bits(n.rx_bps),
+                    icon::ARROW_UP,
+                    fmt_bits(n.tx_bps)
+                )
+            } else {
+                "Not connected".into()
+            };
+            out.push(Device {
+                spec: CardSpec {
+                    sel: PerfSel::Net(n.id.clone()),
+                    icon: net_icon(n),
+                    title: net_title(n),
+                    value: String::new(),
+                    subtitle: sub,
+                    color: colors::NETWORK,
+                },
+                series: &nh.a,
+                series2: Some(&nh.b),
+                max: nice_max(nh.a.max().max(nh.b.max()), 12_500.0),
+            });
+        }
+    }
+    for (i, g) in snap.gpus.iter().enumerate() {
+        if let Some(gh) = h.gpus.get(&g.id) {
+            out.push(Device {
+                spec: CardSpec {
+                    sel: PerfSel::Gpu(g.id.clone()),
+                    icon: icon::GRAPHICS_CARD,
+                    title: format!("GPU {i}"),
+                    value: g.util.map(fmt_percent).unwrap_or_default(),
+                    subtitle: g.name.clone(),
+                    color: colors::GPU,
+                },
+                series: &gh.a,
+                series2: None,
+                max: 100.0,
+            });
+        }
+    }
+    for b in &snap.batteries {
+        if let Some(bh) = h.batteries.get(&b.id) {
+            out.push(Device {
+                spec: CardSpec {
+                    sel: PerfSel::Battery(b.id.clone()),
+                    icon: battery_icon(b),
+                    title: "Battery".into(),
+                    value: format!("{:.0}%", b.percent),
+                    subtitle: b.status.clone(),
+                    color: colors::BATTERY,
+                },
+                series: &bh.a,
+                series2: None,
+                max: 100.0,
+            });
+        }
+    }
+    if !snap.sensors.is_empty() {
+        let hottest = snap
+            .sensors
+            .iter()
+            .filter(|s| s.kind == SensorKind::Temperature)
+            .map(|s| s.value)
+            .reduce(f32::max);
+        let fans = snap
+            .sensors
+            .iter()
+            .filter(|s| s.kind == SensorKind::Fan)
+            .count();
+        let sub = if fans > 0 {
+            format!("{} readings, {fans} fans", snap.sensors.len())
+        } else {
+            format!("{} readings", snap.sensors.len())
+        };
+        out.push(Device {
+            spec: CardSpec {
+                sel: PerfSel::Sensors,
+                icon: icon::THERMOMETER,
+                title: "Sensors".into(),
+                value: hottest.map(fmt_temp).unwrap_or_default(),
+                subtitle: sub,
+                color: colors::SENSORS,
+            },
+            series: &h.cpu_temp,
+            series2: None,
+            max: 100.0,
+        });
+    }
+    out
+}
+
+/// Spacing between the device list, the separator and the details.
+const GUTTER: i8 = 12;
+/// Height of one entry in the device list (for sizing the summary window).
+const CARD_HEIGHT: f32 = 92.0;
+
 pub fn show(
     ui: &mut Ui,
     state: &mut State,
     view: &View<'_>,
     settings_cpu_logical: &mut bool,
     settings_cpu_kernel: &mut bool,
-) {
-    let snap = view.snap;
-    let h = view.history;
-    let cap = view.settings.graph_points;
-    let nets = visible_nets(view);
-
-    // Fall back to CPU if the selected device disappeared.
-    let exists = match &state.selected {
-        PerfSel::Cpu | PerfSel::Memory | PerfSel::Sensors => true,
-        PerfSel::Disk(id) => snap.disks.iter().any(|d| &d.id == id),
-        PerfSel::Net(id) => nets.iter().any(|n| &n.id == id),
-        PerfSel::Gpu(id) => snap.gpus.iter().any(|g| &g.id == id),
-        PerfSel::Battery(id) => snap.batteries.iter().any(|b| &b.id == id),
-    };
-    if !exists {
+) -> Option<Request> {
+    let devices = devices(view);
+    if !devices.iter().any(|d| d.spec.sel == state.selected) {
         state.selected = PerfSel::Cpu;
     }
+    let mut request = None;
 
     egui::Panel::left("perf_devices")
         .resizable(true)
@@ -134,7 +356,7 @@ pub fn show(
         .min_size(190.0)
         .frame(egui::Frame::new().inner_margin(egui::Margin {
             left: 0,
-            right: 8,
+            right: GUTTER,
             top: 0,
             bottom: 0,
         }))
@@ -142,184 +364,248 @@ pub fn show(
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    let freq = snap.cpu.freq_mhz.map(fmt_freq_mhz).unwrap_or_default();
-                    card_entry(
-                        ui,
-                        state,
-                        CardSpec {
-                            sel: PerfSel::Cpu,
-                            icon: icon::CPU,
-                            title: "CPU".into(),
-                            value: fmt_percent(snap.cpu.total),
-                            subtitle: freq,
-                            color: colors::CPU,
-                        },
-                        &h.cpu,
-                        None,
-                        100.0,
-                        cap,
-                    );
-                    card_entry(
-                        ui,
-                        state,
-                        CardSpec {
-                            sel: PerfSel::Memory,
-                            icon: icon::MEMORY,
-                            title: "Memory".into(),
-                            value: fmt_percent(
-                                snap.mem.used as f32 / snap.mem.total.max(1) as f32 * 100.0,
-                            ),
-                            subtitle: format!(
-                                "{} / {}",
-                                fmt_bytes(snap.mem.used),
-                                fmt_bytes(snap.mem.total)
-                            ),
-                            color: colors::MEMORY,
-                        },
-                        &h.mem,
-                        None,
-                        100.0,
-                        cap,
-                    );
-                    for (i, d) in snap.disks.iter().enumerate() {
-                        if let Some(dh) = h.disks.get(&d.id) {
-                            card_entry(
-                                ui,
-                                state,
-                                CardSpec {
-                                    sel: PerfSel::Disk(d.id.clone()),
-                                    icon: icon::HARD_DRIVES,
-                                    title: disk_title(i, d),
-                                    value: fmt_percent(d.active.unwrap_or(0.0)),
-                                    subtitle: d.kind.clone(),
-                                    color: colors::DISK,
-                                },
-                                &dh.a,
-                                None,
-                                100.0,
-                                cap,
-                            );
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for d in devices {
+                        let sel = d.spec.sel.clone();
+                        let resp = card_entry(ui, state, d, view.settings.graph_points);
+                        if resp.double_clicked() {
+                            state.selected = sel.clone();
+                            request = Some(Request::Compact(Compact::Graph));
                         }
+                        resp.on_hover_text_at_pointer("Double-click for a mini view")
+                            .context_menu(|ui| {
+                                if ui
+                                    .button(format!("{} Mini view", icon::PICTURE_IN_PICTURE))
+                                    .clicked()
+                                {
+                                    state.selected = sel.clone();
+                                    request = Some(Request::Compact(Compact::Graph));
+                                }
+                                if ui
+                                    .button(format!("{} Summary view", icon::CORNERS_IN))
+                                    .clicked()
+                                {
+                                    request = Some(Request::Compact(Compact::Summary));
+                                }
+                            });
                     }
-                    for n in &nets {
-                        if let Some(nh) = h.nets.get(&n.id) {
-                            let sub = if n.connected {
-                                format!(
-                                    "{} {}  {} {}",
-                                    icon::ARROW_DOWN,
-                                    fmt_bits(n.rx_bps),
-                                    icon::ARROW_UP,
-                                    fmt_bits(n.tx_bps)
-                                )
-                            } else {
-                                "Not connected".into()
-                            };
-                            let max = nice_max(nh.a.max().max(nh.b.max()), 12_500.0);
-                            card_entry(
-                                ui,
-                                state,
-                                CardSpec {
-                                    sel: PerfSel::Net(n.id.clone()),
-                                    icon: net_icon(n),
-                                    title: net_title(n),
-                                    value: String::new(),
-                                    subtitle: sub,
-                                    color: colors::NETWORK,
-                                },
-                                &nh.a,
-                                Some(&nh.b),
-                                max,
-                                cap,
-                            );
-                        }
-                    }
-                    for (i, g) in snap.gpus.iter().enumerate() {
-                        if let Some(gh) = h.gpus.get(&g.id) {
-                            card_entry(
-                                ui,
-                                state,
-                                CardSpec {
-                                    sel: PerfSel::Gpu(g.id.clone()),
-                                    icon: icon::GRAPHICS_CARD,
-                                    title: format!("GPU {i}"),
-                                    value: g.util.map(fmt_percent).unwrap_or_default(),
-                                    subtitle: g.name.clone(),
-                                    color: colors::GPU,
-                                },
-                                &gh.a,
-                                None,
-                                100.0,
-                                cap,
-                            );
-                        }
-                    }
-                    for b in &snap.batteries {
-                        if let Some(bh) = h.batteries.get(&b.id) {
-                            card_entry(
-                                ui,
-                                state,
-                                CardSpec {
-                                    sel: PerfSel::Battery(b.id.clone()),
-                                    icon: battery_icon(b),
-                                    title: "Battery".into(),
-                                    value: format!("{:.0}%", b.percent),
-                                    subtitle: b.status.clone(),
-                                    color: colors::BATTERY,
-                                },
-                                &bh.a,
-                                None,
-                                100.0,
-                                cap,
-                            );
-                        }
-                    }
-                    if !snap.sensors.is_empty() {
-                        let hottest = snap
-                            .sensors
-                            .iter()
-                            .filter(|s| s.kind == SensorKind::Temperature)
-                            .map(|s| s.value)
-                            .reduce(f32::max);
-                        let fans = snap
-                            .sensors
-                            .iter()
-                            .filter(|s| s.kind == SensorKind::Fan)
-                            .count();
-                        let sub = if fans > 0 {
-                            format!("{} readings, {fans} fans", snap.sensors.len())
-                        } else {
-                            format!("{} readings", snap.sensors.len())
-                        };
-                        card_entry(
-                            ui,
-                            state,
-                            CardSpec {
-                                sel: PerfSel::Sensors,
-                                icon: icon::THERMOMETER,
-                                title: "Sensors".into(),
-                                value: hottest.map(fmt_temp).unwrap_or_default(),
-                                subtitle: sub,
-                                color: colors::SENSORS,
-                            },
-                            &h.cpu_temp,
-                            None,
-                            100.0,
-                            cap,
-                        );
-                    }
+                    ui.add_space(8.0);
                 });
         });
 
-    egui::CentralPanel::no_frame().show(ui, |ui| {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // Keep clear of the (overlay) scroll bar.
-                ui.set_max_width(ui.available_width() - 14.0);
-                show_selected(ui, state, view, settings_cpu_logical, settings_cpu_kernel)
-            });
-    });
+    egui::CentralPanel::no_frame()
+        .frame(egui::Frame::new().inner_margin(egui::Margin {
+            left: GUTTER + 4,
+            ..Default::default()
+        }))
+        .show(ui, |ui| {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Keep clear of the (overlay) scroll bar, as far as from the separator.
+                    ui.set_max_width(ui.available_width() - 16.0);
+                    let top_right = ui.max_rect().right_top();
+                    show_selected(ui, state, view, settings_cpu_logical, settings_cpu_kernel);
+                    ui.add_space(8.0);
+                    let button = egui::Rect::from_min_max(
+                        top_right + vec2(-28.0, 0.0),
+                        top_right + vec2(0.0, 28.0),
+                    );
+                    if ui
+                        .put(
+                            button,
+                            egui::Button::new(RichText::new(icon::PICTURE_IN_PICTURE).size(16.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Mini view: only this graph in a small window")
+                        .clicked()
+                    {
+                        request = Some(Request::Compact(Compact::Graph));
+                    }
+                });
+        });
+    request
+}
+
+/// Size of the window for a compact mode, in points.
+pub fn compact_size(mode: Compact, view: &View<'_>) -> egui::Vec2 {
+    match mode {
+        Compact::Graph => GRAPH_WINDOW_SIZE.into(),
+        Compact::Summary => {
+            let n = devices(view).len() as f32;
+            vec2(280.0, (n * (CARD_HEIGHT + 4.0) + 16.0).clamp(220.0, 900.0))
+        }
+    }
+}
+
+/// The page in a small window: the device list or a single graph.
+pub fn show_compact(
+    ui: &mut Ui,
+    state: &mut State,
+    view: &View<'_>,
+    mode: Compact,
+    on_top: bool,
+) -> Option<Request> {
+    let devices = devices(view);
+    // Wait until a device of that kind appears (disks and adapters come with the first sample).
+    if let Some(kind) = state.pending_kind {
+        // Network: prefer a connected adapter.
+        let connected = |d: &&Device<'_>| match &d.spec.sel {
+            PerfSel::Net(id) => view.snap.nets.iter().any(|n| &n.id == id && n.connected),
+            _ => true,
+        };
+        if let Some(d) = devices
+            .iter()
+            .filter(|d| kind.matches(&d.spec.sel))
+            .find(connected)
+            .or_else(|| devices.iter().find(|d| kind.matches(&d.spec.sel)))
+        {
+            state.selected = d.spec.sel.clone();
+            state.pending_kind = None;
+        }
+    }
+    if !devices.iter().any(|d| d.spec.sel == state.selected) {
+        state.selected = PerfSel::Cpu;
+    }
+    let mut request = None;
+    let menu = |ui: &mut Ui, state: &mut State, request: &mut Option<Request>| {
+        if ui
+            .button(format!("{} Full view  (Esc)", icon::CORNERS_OUT))
+            .clicked()
+        {
+            *request = Some(Request::FullView);
+        }
+        let (other, label) = match mode {
+            Compact::Graph => (
+                Compact::Summary,
+                format!("{} Summary view", icon::CORNERS_IN),
+            ),
+            Compact::Summary => (
+                Compact::Graph,
+                format!("{} Mini view", icon::PICTURE_IN_PICTURE),
+            ),
+        };
+        if ui.button(label).clicked() {
+            *request = Some(Request::Compact(other));
+        }
+        let mut top = on_top;
+        if ui.checkbox(&mut top, "Keep on top").clicked() {
+            *request = Some(Request::ToggleOnTop);
+        }
+        if mode == Compact::Graph {
+            ui.separator();
+            for d in &devices {
+                if ui
+                    .radio(state.selected == d.spec.sel, &d.spec.title)
+                    .clicked()
+                {
+                    state.selected = d.spec.sel.clone();
+                }
+            }
+        }
+    };
+
+    match mode {
+        Compact::Summary => {
+            let mut clicked = None;
+            // Registered first, so the cards on top of it get their clicks.
+            let bg = ui.interact(ui.max_rect(), ui.id().with("summary_bg"), Sense::click());
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for d in &devices {
+                        let sel = d.spec.sel.clone();
+                        let r = card_entry(
+                            ui,
+                            state,
+                            Device {
+                                spec: d.spec.clone(),
+                                ..*d
+                            },
+                            view.settings.graph_points,
+                        );
+                        if r.double_clicked() {
+                            clicked = Some(sel.clone());
+                        }
+                        r.context_menu(|ui| {
+                            state.selected = sel.clone();
+                            menu(ui, state, &mut request);
+                        });
+                    }
+                });
+            if bg.double_clicked() {
+                request = Some(Request::FullView);
+            }
+            bg.context_menu(|ui| menu(ui, state, &mut request));
+            if let Some(sel) = clicked {
+                state.selected = sel;
+                request = Some(Request::Compact(Compact::Graph));
+            }
+        }
+        Compact::Graph => {
+            let d = devices.iter().find(|d| d.spec.sel == state.selected)?;
+            let resp = ui
+                .scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(d.spec.icon).color(d.spec.color));
+                            ui.label(
+                                RichText::new(&d.spec.title)
+                                    .font(super::theme::semibold(13.0))
+                                    .color(ui.visuals().strong_text_color()),
+                            );
+                        },
+                        |ui| {
+                            ui.label(
+                                RichText::new(&d.spec.value)
+                                    .font(super::theme::semibold(15.0))
+                                    .color(ui.visuals().strong_text_color()),
+                            );
+                        },
+                    );
+                    ui.add(
+                        egui::Label::new(RichText::new(&d.spec.subtitle).small().weak()).truncate(),
+                    );
+                    ui.add_space(6.0);
+                    let mut lines = vec![Line {
+                        series: d.series,
+                        color: d.spec.color,
+                        fill: true,
+                        dashed: false,
+                    }];
+                    if let Some(s2) = d.series2 {
+                        lines.push(Line {
+                            series: s2,
+                            color: d.spec.color,
+                            fill: false,
+                            dashed: true,
+                        });
+                    }
+                    graph(
+                        ui,
+                        vec2(ui.available_width(), ui.available_height().max(40.0)),
+                        &lines,
+                        d.max,
+                        view.settings.graph_points,
+                        d.spec.color,
+                        None,
+                        seconds_per_point(view),
+                    );
+                })
+                .response;
+            if resp.double_clicked() {
+                request = Some(Request::FullView);
+            }
+            resp.on_hover_text_at_pointer(
+                "Double-click for the full view, right-click for options",
+            )
+            .context_menu(|ui| menu(ui, state, &mut request));
+        }
+    }
+    request
 }
 
 fn show_selected(
@@ -365,6 +651,7 @@ fn show_selected(
     }
 }
 
+#[derive(Clone)]
 struct CardSpec {
     sel: PerfSel,
     icon: &'static str,
@@ -375,15 +662,8 @@ struct CardSpec {
 }
 
 /// One device in the list on the left: title, value, subtitle and a sparkline.
-fn card_entry(
-    ui: &mut Ui,
-    state: &mut State,
-    spec: CardSpec,
-    series: &Series,
-    series2: Option<&Series>,
-    max: f32,
-    cap: usize,
-) {
+fn card_entry(ui: &mut Ui, state: &mut State, d: Device<'_>, cap: usize) -> egui::Response {
+    let spec = d.spec;
     let selected = state.selected == spec.sel;
     let resp = ui
         .scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
@@ -399,15 +679,10 @@ fn card_entry(
             egui::Frame::new()
                 .fill(fill)
                 .corner_radius(8.0)
-                .inner_margin(egui::Margin {
-                    left: 10,
-                    right: 10,
-                    top: 8,
-                    bottom: 6,
-                })
+                .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     egui::Sides::new().shrink_left().truncate().show(
                         ui,
                         |ui| {
@@ -430,13 +705,13 @@ fn card_entry(
                     ui.add(
                         egui::Label::new(RichText::new(&spec.subtitle).small().weak()).truncate(),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     sparkline(
                         ui,
                         vec2(ui.available_width(), 26.0),
-                        series,
-                        series2,
-                        max,
+                        d.series,
+                        d.series2,
+                        d.max,
                         cap,
                         spec.color,
                     );
@@ -446,13 +721,13 @@ fn card_entry(
     if resp.clicked() {
         state.selected = spec.sel;
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn title_row(ui: &mut Ui, icon_str: &str, color: Color32, title: &str, subtitle: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(icon_str).size(22.0).color(color));
-        ui.add_space(2.0);
+
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.label(
@@ -463,7 +738,7 @@ fn title_row(ui: &mut Ui, icon_str: &str, color: Color32, title: &str, subtitle:
             ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
         });
     });
-    ui.add_space(12.0);
+    ui.add_space(16.0);
 }
 
 /// A graph with caption, scale label and hover values.
@@ -500,7 +775,7 @@ fn graph_card(
         |ui| ui.label(RichText::new(seconds_label(view)).small().weak()),
         |ui| ui.label(RichText::new("0").small().weak()),
     );
-    ui.add_space(12.0);
+    ui.add_space(16.0);
 }
 
 fn seconds_label(view: &View<'_>) -> String {
@@ -523,7 +798,7 @@ fn stat_tiles(ui: &mut Ui, id: &str, stats: &[(&str, String)]) {
     let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
     egui::Grid::new(id)
         .num_columns(cols)
-        .spacing([gap, 14.0])
+        .spacing([gap, 16.0])
         .show(ui, |ui| {
             for (i, (caption, value)) in stats.iter().enumerate() {
                 ui.vertical(|ui| {
@@ -562,7 +837,7 @@ fn kv_card(ui: &mut Ui, id: &str, title: &str, rows: &[(&str, String)]) {
             .font(super::theme::semibold(13.0))
             .color(ui.visuals().strong_text_color()),
     );
-    ui.add_space(4.0);
+    ui.add_space(8.0);
     egui::Grid::new(id)
         .num_columns(2)
         .spacing([32.0, 6.0])
@@ -601,7 +876,7 @@ fn cpu_view(ui: &mut Ui, view: &View<'_>, logical: &mut bool, kernel: &mut bool)
         ui.separator();
         ui.checkbox(kernel, "Show kernel times");
     });
-    ui.add_space(6.0);
+    ui.add_space(8.0);
     if *logical && !h.cores.is_empty() {
         card(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -653,7 +928,7 @@ fn cpu_view(ui: &mut Ui, view: &View<'_>, logical: &mut bool, kernel: &mut bool)
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(16.0);
     } else {
         let mut lines = vec![Line {
             series: &h.cpu,
@@ -738,7 +1013,7 @@ fn cpu_view(ui: &mut Ui, view: &View<'_>, logical: &mut bool, kernel: &mut bool)
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(16.0);
     }
 
     let cache = |v: Option<u64>| v.map(fmt_bytes).unwrap_or_default();
@@ -861,7 +1136,7 @@ fn memory_view(ui: &mut Ui, view: &View<'_>) {
             }
         });
     });
-    ui.add_space(8.0);
+    ui.add_space(16.0);
     let compressed = m
         .compressed
         .filter(|c| *c > 0)
@@ -1216,7 +1491,7 @@ fn battery_view(ui: &mut Ui, view: &View<'_>, b: &BatterySample, bh: &DeviceHist
             ));
         }
     });
-    ui.add_space(8.0);
+    ui.add_space(16.0);
     graph_card(
         ui,
         view,
@@ -1369,9 +1644,10 @@ fn sensors_view(ui: &mut Ui, view: &View<'_>) {
                     }
                 });
         });
-        ui.add_space(8.0);
+        ui.add_space(12.0);
     };
     if ui.available_width() > 760.0 {
+        ui.spacing_mut().item_spacing.x = 12.0;
         ui.columns(2, |cols| {
             for (i, chip) in chips.iter().enumerate() {
                 render_chip(&mut cols[i % 2], chip);

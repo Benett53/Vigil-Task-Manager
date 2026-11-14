@@ -20,6 +20,7 @@ use crate::model::{
     Priority, ProcSignal, ProcessDetails, Service, ServiceAction, Snapshot, StartupEntry,
 };
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum ActionError {
@@ -180,25 +181,59 @@ pub fn has_user_services() -> bool {
 }
 
 /// Whether [`exe_icon`] can return anything on this platform.
-pub const HAS_EXE_ICONS: bool = cfg!(windows);
+pub const HAS_EXE_ICONS: bool = cfg!(any(windows, target_os = "linux"));
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    static ICONS: std::cell::OnceCell<linux::icons::Resolver> = const { std::cell::OnceCell::new() };
+}
 
 /// Prepares a background thread for [`exe_icon`] calls.
 pub fn init_icon_thread() {
     #[cfg(windows)]
     windows::icons::init_thread();
+    #[cfg(target_os = "linux")]
+    ICONS.with(|r| {
+        r.get_or_init(linux::icons::Resolver::new);
+    });
 }
 
-/// The icon of an executable as (width, height, RGBA pixels).
-pub fn exe_icon(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+/// Key under which the icon of a process is loaded with [`exe_icon`]: the executable,
+/// or on Linux the application it belongs to (its launcher names the icon).
+pub fn app_icon_key<'a>(exe: &'a Arc<str>, app_id: Option<&'a Arc<str>>) -> &'a Arc<str> {
+    match app_id {
+        Some(id) if cfg!(target_os = "linux") && id.starts_with("app:") => id,
+        _ => exe,
+    }
+}
+
+/// The icon for a key from [`app_icon_key`] (or an executable path) as
+/// (width, height, RGBA pixels). Call from a thread set up with [`init_icon_thread`].
+pub fn exe_icon(key: &str) -> Option<(usize, usize, Vec<u8>)> {
     #[cfg(windows)]
     {
-        windows::icons::exe_icon(path)
+        windows::icons::exe_icon(key)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = path;
+        ICONS.with(|r| r.get_or_init(linux::icons::Resolver::new).icon(key))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = key;
         None
     }
+}
+
+/// Keeps the window above others where the toolkit cannot (KDE Plasma on Wayland).
+/// Returns `None` when the platform needs no help; blocks briefly, call off the UI thread.
+pub fn keep_above_fallback(on: bool) -> Option<Result<(), String>> {
+    #[cfg(target_os = "linux")]
+    if linux::window::kwin_wayland() {
+        return Some(linux::window::kwin_keep_above(on));
+    }
+    let _ = on;
+    None
 }
 
 /// Full display name of a user (GECOS / account full name).

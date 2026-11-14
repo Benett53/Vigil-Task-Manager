@@ -27,6 +27,8 @@ serde_json = "1.0.154"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# App icons from the icon theme (SVG and PNG).
+resvg = { version = "0.50", default-features = false }
 
 [features]
 default = ["nvidia"]

@@ -75,7 +75,8 @@ enum Row {
 pub struct AppAgg {
     pub id: Arc<str>,
     pub name: Arc<str>,
-    pub exe: Arc<str>,
+    /// Icon key, see [`crate::platform::app_icon_key`].
+    pub icon: Arc<str>,
     pub members: Vec<usize>,
     pub cpu: f32,
     pub mem: u64,
@@ -237,7 +238,7 @@ impl State {
                     apps.push(AppAgg {
                         id: id.clone(),
                         name: name.clone(),
-                        exe: p.exe.clone(),
+                        icon: crate::platform::app_icon_key(&p.exe, Some(id)).clone(),
                         members: Vec::new(),
                         cpu: 0.0,
                         mem: 0,
@@ -496,7 +497,7 @@ impl State {
 
 struct Cells<'a> {
     name: &'a str,
-    exe: &'a Arc<str>,
+    icon: &'a Arc<str>,
     count: Option<usize>,
     depth: u8,
     last: bool,
@@ -747,7 +748,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                         };
                         let cells = Cells {
                             name: &a.name,
-                            exe: &a.exe,
+                            icon: &a.icon,
                             count: Some(a.members.len()),
                             depth: 0,
                             last: false,
@@ -802,7 +803,7 @@ pub fn show(ui: &mut Ui, state: &mut State, view: &View<'_>, actions: &mut Vec<A
                         row.set_selected(state.selected.as_ref() == Some(&sel));
                         let cells = Cells {
                             name: display_name(p),
-                            exe: &p.exe,
+                            icon: &p.exe,
                             count: None,
                             depth,
                             last,
@@ -932,7 +933,7 @@ fn draw_cells(
                 } else {
                     ui.add_space(18.0);
                 }
-                app_icon(ui, view.icons, c.exe, 16.0, c.muted);
+                app_icon(ui, view.icons, c.icon, 16.0, c.muted);
                 let text = if c.muted {
                     RichText::new(c.name).color(ui.visuals().text_color().gamma_multiply(0.8))
                 } else {
@@ -1056,7 +1057,11 @@ fn detail_pane(ui: &mut Ui, state: &mut State, sel: &Sel, view: &View<'_>) {
             vec2(left_w, height),
             Layout::left_to_right(Align::Center),
             |ui| {
-                app_icon(ui, view.icons, &main.exe, 28.0, false);
+                let icon_key = match sel {
+                    Sel::App(_) => crate::platform::app_icon_key(&main.exe, main.app_id.as_ref()),
+                    Sel::Pid(_) => &main.exe,
+                };
+                app_icon(ui, view.icons, icon_key, 28.0, false);
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;

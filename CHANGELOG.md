@@ -4,12 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Linux: application icons in Processes, Details and Users, taken from the launcher (`.desktop`
+  file) and the icon theme of the desktop (SVG and PNG).
+- Performance: summary view (only the device list) and mini view (only one graph) in a small window.
+  Open them from the `…` menu, by double-clicking a device, or with `vigil --summary` and
+  `vigil --mini <device>`. Double-click or Esc returns to the full view. Small windows stay on top
+  unless turned off in their context menu.
+
 ### Changed
+- Performance: even spacing between the device list, the details and the window edges.
 - Linux: sensors that are slow to read, such as the temperature of NVMe drives and Wi-Fi cards, are
   asked every few seconds instead of on every refresh. On a system with two NVMe drives and a Wi-Fi
   card a refresh took 50 ms, of which 37 ms went into these sensors.
 
 ### Fixed
+- KDE Plasma (Wayland): "Always on top" had no effect, because Wayland has no request for it.
+  Vigil now asks KWin over D-Bus.
 - `vigil --snapshot` printed GPU load and memory as raw debug values (`Some(37.0)`); it now prints
   percent and sizes.
 

@@ -352,7 +352,7 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
 /// prepare the folder and swap the download between the checksum check and
 /// the installation. The folder must not exist yet, so one prepared by
 /// someone else is never used.
-fn private_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn private_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
     use std::hash::{BuildHasher as _, Hasher as _};
 
     let base = std::env::temp_dir();

@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 const SETTINGS_KEY: &str = "vigil.settings";
 const APP_HISTORY_KEY: &str = "vigil.app_history";
+/// Where eframe keeps the window geometry (written before `App::save`).
+const WINDOW_KEY: &str = "window";
 
 enum Refresh {
     None,
@@ -46,6 +48,29 @@ struct Applied {
     zoom: f32,
     on_top: bool,
     speed: UpdateSpeed,
+}
+
+/// Compact window requested on the command line.
+#[derive(Clone, Copy)]
+pub enum StartCompact {
+    Summary,
+    Graph(ui::performance::DeviceKind),
+}
+
+impl StartCompact {
+    pub fn mode(self) -> ui::performance::Compact {
+        match self {
+            StartCompact::Summary => ui::performance::Compact::Summary,
+            StartCompact::Graph(_) => ui::performance::Compact::Graph,
+        }
+    }
+
+    pub fn window_size(self) -> [f32; 2] {
+        match self {
+            StartCompact::Summary => [280.0, 560.0],
+            StartCompact::Graph(_) => ui::performance::GRAPH_WINDOW_SIZE,
+        }
+    }
 }
 
 pub struct VigilApp {
@@ -78,10 +103,26 @@ pub struct VigilApp {
     can_elevate: bool,
     running_jobs: usize,
     process_every: u32,
+    /// Performance page shown alone in a small window.
+    compact: Option<ui::performance::Compact>,
+    /// Requested from a menu, applied after the frame's UI.
+    compact_request: Option<Option<ui::performance::Compact>>,
+    /// Window size and maximized state to return to from the compact window.
+    restore: Option<(Option<egui::Vec2>, bool)>,
+    /// eframe's stored geometry of the full window, written back while compact so the
+    /// next start does not open at the small size.
+    full_window: Option<String>,
+    /// Started compact: size the window once the devices are known (eframe restores the
+    /// stored geometry of the full window at startup).
+    size_compact_on_data: bool,
 }
 
 impl VigilApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, start_page: Option<Page>) -> VigilApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        start_page: Option<Page>,
+        start_compact: Option<StartCompact>,
+    ) -> VigilApp {
         theme::install(&cc.egui_ctx);
         let mut settings: Settings = cc
             .storage
@@ -92,6 +133,7 @@ impl VigilApp {
             .storage
             .and_then(|s| eframe::get_value(s, APP_HISTORY_KEY))
             .unwrap_or_default();
+        let full_window = cc.storage.and_then(|s| s.get_string(WINDOW_KEY));
         let ctx = cc.egui_ctx.clone();
         let wake_ctx = ctx.clone();
         let sampler = Sampler::spawn(
@@ -109,9 +151,21 @@ impl VigilApp {
                 wake.request_repaint()
             })
         };
+        let mut performance = ui::performance::State::default();
+        let compact = start_compact.map(|c| match c {
+            StartCompact::Summary => ui::performance::Compact::Summary,
+            StartCompact::Graph(kind) => {
+                performance.pending_kind = Some(kind);
+                ui::performance::Compact::Graph
+            }
+        });
         VigilApp {
             updater,
-            page: start_page.unwrap_or(settings.start_page),
+            page: if compact.is_some() {
+                Page::Performance
+            } else {
+                start_page.unwrap_or(settings.start_page)
+            },
             settings,
             applied: None,
             sampler,
@@ -125,7 +179,7 @@ impl VigilApp {
             search_lower: String::new(),
             focus_search: false,
             processes: Default::default(),
-            performance: Default::default(),
+            performance,
             app_hist: Default::default(),
             startup: Default::default(),
             users: Default::default(),
@@ -139,6 +193,12 @@ impl VigilApp {
             can_elevate: platform::can_elevate(),
             running_jobs: 0,
             process_every: 1,
+            compact,
+            compact_request: None,
+            // Started compact: "Full view" opens the usual window size.
+            restore: compact.map(|_| (Some(crate::FULL_WINDOW_SIZE.into()), false)),
+            full_window,
+            size_compact_on_data: compact.is_some(),
         }
     }
 
@@ -534,7 +594,8 @@ impl VigilApp {
         let want = Applied {
             theme: self.settings.theme,
             zoom: self.settings.zoom,
-            on_top: self.settings.always_on_top,
+            on_top: self.settings.always_on_top
+                || (self.compact.is_some() && self.settings.compact_on_top),
             speed: self.settings.update_speed,
         };
         let first = self.applied.is_none();
@@ -559,6 +620,20 @@ impl VigilApp {
             } else {
                 egui::WindowLevel::Normal
             }));
+            // Wayland has no "always on top" for clients; KWin can do it on request.
+            let on = want.on_top;
+            let wait = first;
+            let _ = std::thread::Builder::new()
+                .name("vigil-keep-above".into())
+                .spawn(move || {
+                    if wait {
+                        // Let the compositor map the window first.
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                    if let Some(Err(e)) = platform::keep_above_fallback(on) {
+                        eprintln!("vigil: could not keep the window on top: {e}");
+                    }
+                });
         }
         if prev.as_ref().is_some_and(|p| p.speed != want.speed) {
             self.sampler
@@ -567,6 +642,53 @@ impl VigilApp {
                 .send(Command::SetPaused(want.speed == UpdateSpeed::Paused));
         }
         self.applied = Some(want);
+    }
+
+    /// Switches between the full window and a compact Performance window.
+    fn set_compact(&mut self, ctx: &egui::Context, mode: Option<ui::performance::Compact>) {
+        if mode == self.compact {
+            return;
+        }
+        match mode {
+            Some(m) => {
+                if self.compact.is_none() {
+                    self.restore = Some(ctx.input(|i| {
+                        let v = i.viewport();
+                        (v.inner_rect.map(|r| r.size()), v.maximized == Some(true))
+                    }));
+                    ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(
+                        crate::COMPACT_MIN_SIZE.into(),
+                    ));
+                }
+                self.page = Page::Performance;
+                let size = ui::performance::compact_size(m, &self.view());
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                ctx.send_viewport_cmd(ViewportCommand::Title(m.window_title().into()));
+            }
+            None => {
+                ctx.send_viewport_cmd(ViewportCommand::Title(crate::WINDOW_TITLE.into()));
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(crate::MIN_WINDOW_SIZE.into()));
+                if let Some((size, maximized)) = self.restore.take() {
+                    if let Some(size) = size {
+                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                    }
+                    if maximized {
+                        ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+                    }
+                }
+            }
+        }
+        self.compact = mode;
+    }
+
+    fn handle_perf_request(&mut self, ctx: &egui::Context, req: ui::performance::Request) {
+        use ui::performance::Request;
+        match req {
+            Request::Compact(m) => self.set_compact(ctx, Some(m)),
+            Request::FullView => self.set_compact(ctx, None),
+            Request::ToggleOnTop => self.settings.compact_on_top = !self.settings.compact_on_top,
+        }
     }
 
     fn view(&self) -> View<'_> {
@@ -624,6 +746,9 @@ impl VigilApp {
         }
         if esc && !self.search.is_empty() {
             self.clear_search();
+        }
+        if esc && self.compact.is_some() {
+            self.compact_request = Some(None);
         }
         if let Some(n) = page_key {
             self.page = Page::MAIN[n];
@@ -1038,6 +1163,25 @@ impl VigilApp {
                 }
             });
             ui.checkbox(&mut self.settings.always_on_top, "Always on top");
+            if self.page == Page::Performance {
+                ui.separator();
+                if ui
+                    .button(format!("{} Summary view", icon::CORNERS_IN))
+                    .on_hover_text("Only the device list, in a small window")
+                    .clicked()
+                {
+                    self.compact_request = Some(Some(ui::performance::Compact::Summary));
+                    ui.close();
+                }
+                if ui
+                    .button(format!("{} Mini view", icon::PICTURE_IN_PICTURE))
+                    .on_hover_text("Only the graph of the selected device, in a small window")
+                    .clicked()
+                {
+                    self.compact_request = Some(Some(ui::performance::Compact::Graph));
+                    ui.close();
+                }
+            }
             ui.separator();
             if ui
                 .button(format!("{} Export process list (CSV)", icon::FILE_CSV))
@@ -1167,9 +1311,60 @@ impl eframe::App for VigilApp {
             ctx.request_repaint_after(Duration::from_secs(10));
         }
 
+        // Leaving the Performance page (e.g. with Ctrl+1) ends the compact window.
+        if self.compact.is_some() && self.page != Page::Performance {
+            self.compact_request = Some(None);
+        }
+        if let Some(mode) = self.compact
+            && self.compact_request.is_none()
+        {
+            let snap = self.snap.clone();
+            let view = View {
+                snap: &snap,
+                history: &self.history,
+                app_history: &self.app_history,
+                proc_history: &self.proc_history,
+                settings: &self.settings,
+                icons: &self.icons,
+                search: &self.search_lower,
+            };
+            if self.size_compact_on_data && self.has_data {
+                self.size_compact_on_data = false;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(ui::performance::compact_size(
+                    mode, &view,
+                )));
+            }
+            let on_top = self.settings.compact_on_top;
+            let req = egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().panel_fill)
+                        .inner_margin(egui::Margin::same(8)),
+                )
+                .show(ui, |ui| {
+                    ui::performance::show_compact(ui, &mut self.performance, &view, mode, on_top)
+                })
+                .inner;
+            if let Some(req) = req {
+                self.handle_perf_request(&ctx, req);
+            }
+            for outcome in self.dialogs.show(&ctx, self.can_elevate) {
+                self.handle_outcome(outcome);
+            }
+            for action in actions {
+                self.handle_action(action);
+            }
+            return;
+        }
+        if let Some(mode) = self.compact_request.take() {
+            self.set_compact(&ctx, mode);
+            ctx.request_repaint();
+        }
+
         self.nav_rail(ui);
         self.header(ui, &mut actions);
         self.status_bar(ui);
+        let mut perf_request = None;
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
             if !self.has_data && self.page != Page::Settings {
@@ -1195,7 +1390,7 @@ impl eframe::App for VigilApp {
                 Page::Performance => {
                     let mut logical = self.settings.cpu_logical_view;
                     let mut kernel = self.settings.cpu_show_kernel;
-                    ui::performance::show(
+                    perf_request = ui::performance::show(
                         ui,
                         &mut self.performance,
                         &view,
@@ -1226,6 +1421,9 @@ impl eframe::App for VigilApp {
             }
         });
 
+        if let Some(req) = perf_request {
+            self.handle_perf_request(&ctx, req);
+        }
         for outcome in self.dialogs.show(&ctx, self.can_elevate) {
             self.handle_outcome(outcome);
         }
@@ -1235,6 +1433,13 @@ impl eframe::App for VigilApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.compact.is_some() {
+            if let Some(w) = &self.full_window {
+                storage.set_string(WINDOW_KEY, w.clone());
+            }
+        } else {
+            self.full_window = storage.get_string(WINDOW_KEY);
+        }
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
         eframe::set_value(storage, APP_HISTORY_KEY, &self.app_history);
     }

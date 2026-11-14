@@ -16,6 +16,11 @@ mod util;
 use std::process::ExitCode;
 
 const APP_ID: &str = "io.github.baba537.Vigil";
+/// Smallest size of the full window (the compact Performance window may be smaller).
+const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 420.0];
+const WINDOW_TITLE: &str = "Vigil Task Manager";
+const FULL_WINDOW_SIZE: [f32; 2] = [1120.0, 740.0];
+const COMPACT_MIN_SIZE: [f32; 2] = [220.0, 150.0];
 
 fn print_help() {
     println!(
@@ -178,6 +183,7 @@ fn print_snapshot() {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut start_page = None;
+    let mut compact = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -187,6 +193,17 @@ fn main() -> ExitCode {
                     Some(p) => start_page = Some(p),
                     None => {
                         eprintln!("vigil: unknown page '{name}' (see --help)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--summary" => compact = Some(app::StartCompact::Summary),
+            "--mini" => {
+                let kind = it.next().map(String::as_str).unwrap_or("");
+                match ui::performance::DeviceKind::from_cli(kind) {
+                    Some(k) => compact = Some(app::StartCompact::Graph(k)),
+                    None => {
+                        eprintln!("vigil: unknown device '{kind}' (see --help)");
                         return ExitCode::from(2);
                     }
                 }
@@ -214,23 +231,32 @@ fn main() -> ExitCode {
     }
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/vigil-128.png")).ok();
+    let title = compact.map_or(WINDOW_TITLE, |c| c.mode().window_title());
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Vigil Task Manager")
-        .with_app_id(APP_ID)
-        .with_inner_size([1120.0, 740.0])
-        .with_min_inner_size([640.0, 420.0]);
+        .with_title(title)
+        .with_app_id(APP_ID);
+    viewport = match compact {
+        None => viewport
+            .with_inner_size(FULL_WINDOW_SIZE)
+            .with_min_inner_size(MIN_WINDOW_SIZE),
+        Some(c) => viewport
+            .with_inner_size(c.window_size())
+            .with_min_inner_size(COMPACT_MIN_SIZE),
+    };
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow,
+        // A compact start uses its own size; the full window keeps its stored geometry.
+        persist_window: compact.is_none(),
         ..Default::default()
     };
     match eframe::run_native(
         APP_ID,
         options,
-        Box::new(move |cc| Ok(Box::new(app::VigilApp::new(cc, start_page)))),
+        Box::new(move |cc| Ok(Box::new(app::VigilApp::new(cc, start_page, compact)))),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

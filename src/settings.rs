@@ -197,6 +197,8 @@ pub struct Settings {
     pub start_page: Page,
     pub update_speed: UpdateSpeed,
     pub always_on_top: bool,
+    /// Keep the small Performance windows (summary and mini view) above others.
+    pub compact_on_top: bool,
     pub minimize_on_use: bool,
     pub confirm_end_task: bool,
     pub show_kernel_threads: bool,
@@ -230,6 +232,7 @@ impl Default for Settings {
             start_page: Page::Processes,
             update_speed: UpdateSpeed::Normal,
             always_on_top: false,
+            compact_on_top: true,
             minimize_on_use: false,
             confirm_end_task: true,
             show_kernel_threads: false,
