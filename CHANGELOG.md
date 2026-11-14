@@ -4,30 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
 ### Added
-- Linux: application icons in Processes, Details and Users, taken from the launcher (`.desktop`
-  file) and the icon theme of the desktop (SVG and PNG).
-- Performance: summary view (only the device list) and mini view (only one graph) in a small window.
-  Open them from the `…` menu, by double-clicking a device, or with `vigil --summary` and
-  `vigil --mini <device>`. Double-click or Esc returns to the full view. Small windows stay on top
-  unless turned off in their context menu.
+- Linux: application icons in Processes, Details and Users, from the app's `.desktop` file and the
+  desktop's icon theme.
+- Performance: summary view (device list only) and mini view (one graph only) in a small window that
+  stays on top. Open them from the `…` menu, by double-clicking a device, or with `vigil --summary`
+  and `vigil --mini <device>`. Double-click or Esc returns to the full view.
 
 ### Changed
 - Performance: even spacing between the device list, the details and the window edges.
-- Linux: sensors that are slow to read, such as the temperature of NVMe drives and Wi-Fi cards, are
-  asked every few seconds instead of on every refresh. On a system with two NVMe drives and a Wi-Fi
-  card a refresh took 50 ms, of which 37 ms went into these sensors.
+- Linux: slow sensors (NVMe and Wi-Fi temperatures) are read every few seconds instead of on every
+  refresh. A refresh took 50 ms on a test system, 37 ms of it for these sensors.
 
 ### Fixed
-- KDE Plasma (Wayland): "Always on top" had no effect, because Wayland has no request for it.
-  Vigil now asks KWin over D-Bus.
-- `vigil --snapshot` printed GPU load and memory as raw debug values (`Some(37.0)`); it now prints
-  percent and sizes.
+- KDE Plasma on Wayland: "Always on top" had no effect. Vigil now asks KWin directly.
+- `vigil --snapshot` printed GPU load and memory as raw debug values.
 
 ### Security
-- Linux: the updater downloaded into a folder with a fixed name in the shared temporary directory. Another
-  local user could prepare that folder and swap the file between the checksum check and the installation.
-  The folder is now created anew for each update, with an unpredictable name and for this user only.
+- Linux: updates are downloaded into a new private folder with a random name instead of a fixed path
+  in `/tmp`, where another local user could swap the file before installation.
 - Updated `tokio` to 1.54.1 (RUSTSEC-2026-0386).
 
 ## [0.4.0] - 2026-10-27
