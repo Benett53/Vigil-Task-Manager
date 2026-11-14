@@ -126,6 +126,12 @@ fn updates(ui: &mut Ui, s: &mut Settings, updater: &Updater) {
             }
             Status::Downloading(..) => Some(RichText::new("Downloading...").weak()),
             Status::Installing => Some(RichText::new("Installing, Vigil restarts...").weak()),
+            Status::Installed(version) => Some(
+                RichText::new(format!(
+                    "Version {version} is installed. Restart Vigil to use it."
+                ))
+                .color(ui.visuals().warn_fg_color),
+            ),
             Status::Failed(error) => Some(RichText::new(error).color(ui.visuals().error_fg_color)),
         };
         if let Some(line) = line {
@@ -134,7 +140,7 @@ fn updates(ui: &mut Ui, s: &mut Settings, updater: &Updater) {
     });
     let busy = matches!(
         status,
-        Status::Checking | Status::Downloading(..) | Status::Installing
+        Status::Checking | Status::Downloading(..) | Status::Installing | Status::Installed(_)
     );
     let ctx = ui.ctx().clone();
     let wake = move || ctx.request_repaint();

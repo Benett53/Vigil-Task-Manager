@@ -1,6 +1,6 @@
 [package]
 name = "vigil"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Fast, free and open source task manager for Linux and Windows, in the style of the Windows Task Manager"

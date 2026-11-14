@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-14
+
+### Fixed
+- Linux: after "Download and install" the settings showed "Update failed: No such file or directory",
+  although the update was installed. Vigil tried to restart from the replaced program file. It now
+  restarts the new version, and if that is not possible, it says that the update is installed and
+  Vigil needs a restart.
+- Portable copies on Linux could restart the old version after an update.
+
 ## [0.5.0] - 2026-11-14
 
 ### Added

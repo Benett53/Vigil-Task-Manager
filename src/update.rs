@@ -58,6 +58,8 @@ pub enum Status {
     Downloading(u64, Option<u64>),
     /// The new version is being installed; the program is about to quit.
     Installing,
+    /// The new version is installed but could not be started; the user restarts Vigil.
+    Installed(String),
     Failed(String),
 }
 
@@ -187,10 +189,11 @@ impl Updater {
                 }
             };
             match download_and_install(&release, true, progress) {
-                Ok(()) => {
+                Ok(true) => {
                     this.set(Status::Installing);
                     this.restart.store(true, Ordering::Release);
                 }
+                Ok(false) => this.set(Status::Installed(release.version.clone())),
                 Err(error) => this.set(Status::Failed(format!("Update failed: {error}"))),
             }
             this.busy.store(false, Ordering::Release);
@@ -223,7 +226,7 @@ pub fn run_cli() -> i32 {
         }
     };
     match download_and_install(&release, false, progress) {
-        Ok(()) => {
+        Ok(_) => {
             println!("\rUpdated to {}.", release.version);
             0
         }
@@ -416,11 +419,12 @@ fn download(url: &str, dest: &Path, progress: &impl Fn(u64, Option<u64>)) -> Res
 
 /// Download the right file for this copy, check it, and hand over to it.
 /// `restart` starts the new version afterwards; the command line does not.
+/// Returns whether the new version was started.
 fn download_and_install(
     release: &Release,
     restart: bool,
     progress: impl Fn(u64, Option<u64>),
-) -> Result<()> {
+) -> Result<bool> {
     let plan = plan(release)?;
     let asset = release
         .asset(&plan.asset)
@@ -481,8 +485,18 @@ enum Method {
     InstallScript { system: bool },
 }
 
+/// Path of the running program. After the file was replaced, Linux reports it as
+/// `<path> (deleted)`; the path itself then holds the new version.
 fn current_exe() -> Result<PathBuf> {
-    std::env::current_exe().map_err(|e| e.to_string())
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(strip_deleted(exe))
+}
+
+fn strip_deleted(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    }
 }
 
 fn old_path(exe: &Path) -> PathBuf {
@@ -572,10 +586,16 @@ fn plan(_release: &Release) -> Result<Plan> {
     Err("updates are not supported on this system".into())
 }
 
-fn install(plan: &Plan, file: &Path, dir: &Path, restart: bool) -> Result<()> {
+/// Returns whether the new version was started.
+fn install(plan: &Plan, file: &Path, dir: &Path, restart: bool) -> Result<bool> {
+    // Taken before the installation replaces the file: afterwards the running
+    // program may point to the old copy (`vigil.old`) or to a deleted file.
+    let exe = current_exe()?;
     match plan.method {
         #[cfg(windows)]
-        Method::Installer { all_users } => return run_installer(file, all_users, restart),
+        Method::Installer { all_users } => {
+            return run_installer(file, all_users, restart).map(|()| restart);
+        }
         Method::Portable => {
             let unpacked = unpack(file, dir)?;
             replace_executable(&unpacked)?;
@@ -633,12 +653,17 @@ fn install(plan: &Plan, file: &Path, dir: &Path, restart: bool) -> Result<()> {
             }
         }
     }
-    if restart {
-        std::process::Command::new(current_exe()?)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    if !restart {
+        return Ok(false);
     }
-    Ok(())
+    match std::process::Command::new(&exe).spawn() {
+        Ok(_) => Ok(true),
+        // Installed all the same: say so instead of reporting a failed update.
+        Err(error) => {
+            eprintln!("vigil: could not start {}: {error}", exe.display());
+            Ok(false)
+        }
+    }
 }
 
 /// The system `tar`. On Windows the one in System32 (bsdtar, reads zip files),
@@ -763,6 +788,19 @@ fn replace_executable(new: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_program_keeps_its_path() {
+        use std::path::PathBuf;
+        assert_eq!(
+            strip_deleted(PathBuf::from("/home/u/.local/bin/vigil (deleted)")),
+            PathBuf::from("/home/u/.local/bin/vigil")
+        );
+        assert_eq!(
+            strip_deleted(PathBuf::from("/usr/bin/vigil")),
+            PathBuf::from("/usr/bin/vigil")
+        );
+    }
 
     #[test]
     fn the_download_folder_is_new_and_private() {
